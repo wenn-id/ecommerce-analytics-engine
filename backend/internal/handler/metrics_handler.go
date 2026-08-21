@@ -2,52 +2,64 @@ package handler
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"strconv"
 	"time"
 
+	"ecommerce-analytics/internal/config"
+	"ecommerce-analytics/internal/model"
 	"ecommerce-analytics/internal/service"
 	"ecommerce-analytics/internal/store"
 )
 
 type MetricsHandler struct {
-	mux          *http.ServeMux
+	handler      http.Handler
 	analyticsSvc service.AnalyticsService
 	syncSvc      service.SyncService
 	repo         store.Repository
+	cfg          *config.Config
+	limiter      *RateLimiter
 }
 
-func NewMetricsHandler(analyticsSvc service.AnalyticsService, syncSvc service.SyncService, repo store.Repository) *MetricsHandler {
+func NewMetricsHandler(analyticsSvc service.AnalyticsService, syncSvc service.SyncService, repo store.Repository, cfg *config.Config) *MetricsHandler {
+	if cfg == nil {
+		cfg = config.Load()
+	}
+	mux := http.NewServeMux()
+	limiter := NewRateLimiter(50, 100)
+
 	h := &MetricsHandler{
-		mux:          http.NewServeMux(),
 		analyticsSvc: analyticsSvc,
 		syncSvc:      syncSvc,
 		repo:         repo,
+		cfg:          cfg,
+		limiter:      limiter,
 	}
-	h.registerRoutes()
+	h.registerRoutes(mux)
+
+	h.handler = Chain(
+		mux,
+		RecoveryMiddleware,
+		LoggingMiddleware,
+		CORSMiddleware(cfg),
+		RateLimitMiddleware(limiter),
+		AuthMiddleware(cfg),
+	)
 	return h
 }
 
 func (h *MetricsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-
-	if r.Method == "OPTIONS" {
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-
-	h.mux.ServeHTTP(w, r)
+	h.handler.ServeHTTP(w, r)
 }
 
-func (h *MetricsHandler) registerRoutes() {
-	h.mux.HandleFunc("/api/v1/health", h.handleHealth)
-	h.mux.HandleFunc("/api/v1/metrics/overview", h.handleOverview)
-	h.mux.HandleFunc("/api/v1/metrics/trend", h.handleTrend)
-	h.mux.HandleFunc("/api/v1/metrics/channels", h.handleChannels)
-	h.mux.HandleFunc("/api/v1/campaigns", h.handleCampaigns)
-	h.mux.HandleFunc("/api/v1/sync", h.handleSync)
+func (h *MetricsHandler) registerRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("/api/v1/health", h.handleHealth)
+	mux.HandleFunc("/api/v1/metrics/overview", h.handleOverview)
+	mux.HandleFunc("/api/v1/metrics/trend", h.handleTrend)
+	mux.HandleFunc("/api/v1/metrics/channels", h.handleChannels)
+	mux.HandleFunc("/api/v1/campaigns", h.handleCampaigns)
+	mux.HandleFunc("/api/v1/sync", h.handleSync)
 }
 
 func (h *MetricsHandler) parseDateRange(r *http.Request) (time.Time, time.Time) {
@@ -70,7 +82,23 @@ func (h *MetricsHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	jsonResponse(w, http.StatusOK, map[string]string{"status": "ok", "timestamp": time.Now().Format(time.RFC3339)})
+	dbStatus := "ok"
+	statusCode := http.StatusOK
+	overallStatus := "ok"
+
+	if h.repo != nil {
+		if err := h.repo.Ping(r.Context()); err != nil {
+			log.Printf("Health check: database ping failed: %v", err)
+			dbStatus = "unavailable"
+			overallStatus = "unhealthy"
+			statusCode = http.StatusServiceUnavailable
+		}
+	}
+	jsonResponse(w, statusCode, map[string]string{
+		"status":    overallStatus,
+		"database":  dbStatus,
+		"timestamp": time.Now().Format(time.RFC3339),
+	})
 }
 
 func (h *MetricsHandler) handleOverview(w http.ResponseWriter, r *http.Request) {
@@ -78,10 +106,12 @@ func (h *MetricsHandler) handleOverview(w http.ResponseWriter, r *http.Request) 
 		jsonError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	w.Header().Set("Cache-Control", "public, max-age=60")
 	start, end := h.parseDateRange(r)
 	data, err := h.analyticsSvc.GetOverviewMetrics(r.Context(), start, end)
 	if err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		log.Printf("Error fetching overview metrics: %v", err)
+		jsonError(w, http.StatusInternalServerError, "failed to fetch overview metrics")
 		return
 	}
 	jsonResponse(w, http.StatusOK, data)
@@ -92,10 +122,12 @@ func (h *MetricsHandler) handleTrend(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	w.Header().Set("Cache-Control", "public, max-age=60")
 	start, end := h.parseDateRange(r)
 	data, err := h.analyticsSvc.GetTrendData(r.Context(), start, end)
 	if err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		log.Printf("Error fetching trend data: %v", err)
+		jsonError(w, http.StatusInternalServerError, "failed to fetch trend data")
 		return
 	}
 	jsonResponse(w, http.StatusOK, data)
@@ -106,10 +138,12 @@ func (h *MetricsHandler) handleChannels(w http.ResponseWriter, r *http.Request) 
 		jsonError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	w.Header().Set("Cache-Control", "public, max-age=60")
 	start, end := h.parseDateRange(r)
 	data, err := h.analyticsSvc.GetChannelBreakdown(r.Context(), start, end)
 	if err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		log.Printf("Error fetching channel breakdown: %v", err)
+		jsonError(w, http.StatusInternalServerError, "failed to fetch channel breakdown")
 		return
 	}
 	jsonResponse(w, http.StatusOK, data)
@@ -120,17 +154,70 @@ func (h *MetricsHandler) handleCampaigns(w http.ResponseWriter, r *http.Request)
 		jsonError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	chIDStr := r.URL.Query().Get("channel_id")
+	w.Header().Set("Cache-Control", "public, max-age=30")
+
+	query := r.URL.Query()
+	chIDStr := query.Get("channel_id")
 	var chID int64
 	if chIDStr != "" {
 		chID, _ = strconv.ParseInt(chIDStr, 10, 64)
 	}
-	data, err := h.repo.GetCampaigns(r.Context(), chID)
+
+	status := query.Get("status")
+	search := query.Get("search")
+	if len(search) > 200 {
+		search = search[:200]
+	}
+
+	page := 1
+	if pStr := query.Get("page"); pStr != "" {
+		if p, err := strconv.Atoi(pStr); err == nil && p > 0 {
+			page = p
+		}
+	}
+
+	limit := 10
+	if lStr := query.Get("limit"); lStr != "" {
+		if l, err := strconv.Atoi(lStr); err == nil && l > 0 {
+			if l > 100 {
+				limit = 100
+			} else {
+				limit = l
+			}
+		}
+	}
+
+	filter := model.CampaignFilter{
+		ChannelID: chID,
+		Status:    status,
+		Search:    search,
+		Page:      page,
+		Limit:     limit,
+	}
+
+	campaigns, totalRecords, err := h.repo.GetCampaigns(r.Context(), filter)
 	if err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		log.Printf("Error fetching campaigns: %v", err)
+		jsonError(w, http.StatusInternalServerError, "failed to fetch campaigns")
 		return
 	}
-	jsonResponse(w, http.StatusOK, data)
+
+	totalPages := 0
+	if totalRecords > 0 {
+		totalPages = (totalRecords + limit - 1) / limit
+	}
+
+	response := model.PaginatedCampaigns{
+		Data: campaigns,
+		Pagination: model.PaginationMeta{
+			CurrentPage:  page,
+			Limit:        limit,
+			TotalRecords: totalRecords,
+			TotalPages:   totalPages,
+		},
+	}
+
+	jsonResponse(w, http.StatusOK, response)
 }
 
 func (h *MetricsHandler) handleSync(w http.ResponseWriter, r *http.Request) {
@@ -138,10 +225,18 @@ func (h *MetricsHandler) handleSync(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+
+	// CSRF protection on state-mutating POST /sync: require custom header or API key
+	if r.Header.Get("X-Requested-With") == "" && r.Header.Get("X-API-Key") == "" && r.Header.Get("X-CSRF-Token") == "" {
+		jsonError(w, http.StatusForbidden, "CSRF protection: missing custom request header")
+		return
+	}
+
 	end := time.Now()
 	start := end.AddDate(0, 0, -30)
 	if err := h.syncSvc.SyncAll(r.Context(), start, end); err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		log.Printf("Error triggering sync: %v", err)
+		jsonError(w, http.StatusInternalServerError, "failed to trigger multi-channel sync")
 		return
 	}
 	jsonResponse(w, http.StatusOK, map[string]string{"status": "sync_completed"})

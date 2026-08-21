@@ -67,4 +67,38 @@ func TestRepositoryInitAndUpsert(t *testing.T) {
 	if metrics[0].Spend != 100000.0 {
 		t.Errorf("expected spend 100000, got %f", metrics[0].Spend)
 	}
+
+	// 4. Test GetCampaigns with pagination and filters
+	campaigns, total, err := repo.GetCampaigns(ctx, model.CampaignFilter{
+		Page:  1,
+		Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("failed to get campaigns: %v", err)
+	}
+	if total != 1 || len(campaigns) != 1 {
+		t.Errorf("expected 1 campaign, got %d total %d", len(campaigns), total)
+	}
+	if campaigns[0].Name != "Summer Promo" {
+		t.Errorf("expected campaign name 'Summer Promo', got %s", campaigns[0].Name)
+	}
+
+	// Test search filter
+	searchResults, searchTotal, err := repo.GetCampaigns(ctx, model.CampaignFilter{
+		Search: "Promo",
+		Page:   1,
+		Limit:  10,
+	})
+	if err != nil || searchTotal != 1 || len(searchResults) != 1 {
+		t.Errorf("expected search match, got %d total %d (err: %v)", len(searchResults), searchTotal, err)
+	}
+
+	noMatchResults, noMatchTotal, err := repo.GetCampaigns(ctx, model.CampaignFilter{
+		Search: "Winter",
+		Page:   1,
+		Limit:  10,
+	})
+	if err != nil || noMatchTotal != 0 || len(noMatchResults) != 0 {
+		t.Errorf("expected 0 matches, got %d total %d (err: %v)", len(noMatchResults), noMatchTotal, err)
+	}
 }

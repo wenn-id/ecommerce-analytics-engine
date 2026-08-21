@@ -3,6 +3,9 @@ package store
 import (
 	"context"
 	"database/sql"
+	"fmt"
+	"math"
+	"strings"
 	"time"
 
 	"ecommerce-analytics/internal/model"
@@ -10,6 +13,7 @@ import (
 
 type Repository interface {
 	InitSchema(ctx context.Context) error
+	Ping(ctx context.Context) error
 	GetChannels(ctx context.Context) ([]model.Channel, error)
 	UpsertChannel(ctx context.Context, ch model.Channel) (int64, error)
 	UpsertCampaigns(ctx context.Context, campaigns []model.Campaign) error
@@ -17,8 +21,10 @@ type Repository interface {
 	UpsertSalesMetrics(ctx context.Context, metrics []model.DailySalesMetric) error
 	InsertSyncLog(ctx context.Context, log model.SyncLog) error
 	QueryAdMetrics(ctx context.Context, startDate, endDate time.Time) ([]model.DailyAdMetric, error)
-	QuerySalesMetrics(ctx context.Context, startDate, endDate time.Time) ([]model.DailySalesMetric, error)
-	GetCampaigns(ctx context.Context, channelID int64) ([]model.Campaign, error)
+	GetCampaigns(ctx context.Context, filter model.CampaignFilter) ([]model.Campaign, int, error)
+	GetAggregatedOverview(ctx context.Context, startDate, endDate time.Time) (totalSpend float64, totalGMV float64, totalCOGS float64, totalOrders int, err error)
+	GetAggregatedDailyTrends(ctx context.Context, startDate, endDate time.Time) ([]model.TrendDataPoint, error)
+	GetAggregatedChannelSummaries(ctx context.Context, startDate, endDate time.Time) ([]model.ChannelSummary, error)
 }
 
 type sqliteRepository struct {
@@ -27,6 +33,10 @@ type sqliteRepository struct {
 
 func NewRepository(db *sql.DB) Repository {
 	return &sqliteRepository{db: db}
+}
+
+func (r *sqliteRepository) Ping(ctx context.Context) error {
+	return r.db.PingContext(ctx)
 }
 
 func (r *sqliteRepository) InitSchema(ctx context.Context) error {
@@ -82,6 +92,16 @@ func (r *sqliteRepository) InitSchema(ctx context.Context) error {
 		records_processed INTEGER NOT NULL,
 		error_message TEXT
 	);
+
+	CREATE INDEX IF NOT EXISTS idx_campaigns_channel_id ON campaigns(channel_id);
+	CREATE INDEX IF NOT EXISTS idx_campaigns_status ON campaigns(status);
+	CREATE INDEX IF NOT EXISTS idx_campaigns_name ON campaigns(name);
+	CREATE INDEX IF NOT EXISTS idx_daily_ad_metrics_date ON daily_ad_metrics(date);
+	CREATE INDEX IF NOT EXISTS idx_daily_ad_metrics_campaign_date ON daily_ad_metrics(campaign_id, date);
+	CREATE INDEX IF NOT EXISTS idx_daily_sales_metrics_date ON daily_sales_metrics(date);
+	CREATE INDEX IF NOT EXISTS idx_daily_sales_metrics_channel_date ON daily_sales_metrics(channel_id, date);
+	CREATE INDEX IF NOT EXISTS idx_sync_logs_channel_id ON sync_logs(channel_id);
+	CREATE INDEX IF NOT EXISTS idx_sync_logs_channel_synced ON sync_logs(channel_id, synced_at);
 	`
 	_, err := r.db.ExecContext(ctx, schema)
 	return err
@@ -127,6 +147,9 @@ func (r *sqliteRepository) GetChannels(ctx context.Context) ([]model.Channel, er
 			ch.LastSyncedAt = &lastSync.Time
 		}
 		channels = append(channels, ch)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return channels, nil
 }
@@ -250,9 +273,15 @@ func (r *sqliteRepository) QueryAdMetrics(ctx context.Context, startDate, endDat
 		if err := rows.Scan(&m.ID, &m.CampaignID, &dStr, &m.Impressions, &m.Clicks, &m.Spend, &m.Conversions, &m.AttributedRevenue); err != nil {
 			return nil, err
 		}
-		t, _ := time.Parse("2006-01-02", dStr)
+		t, err := parseDate(dStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid date format in daily_ad_metrics %q: %w", dStr, err)
+		}
 		m.Date = t
 		results = append(results, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return results, nil
 }
@@ -277,26 +306,70 @@ func (r *sqliteRepository) QuerySalesMetrics(ctx context.Context, startDate, end
 		if err := rows.Scan(&m.ID, &m.ChannelID, &dStr, &m.TotalOrders, &m.GMV, &m.NetSales, &m.COGS, &m.ReturnedOrders); err != nil {
 			return nil, err
 		}
-		t, _ := time.Parse("2006-01-02", dStr)
+		t, err := parseDate(dStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid date format in daily_sales_metrics %q: %w", dStr, err)
+		}
 		m.Date = t
 		results = append(results, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return results, nil
 }
 
-func (r *sqliteRepository) GetCampaigns(ctx context.Context, channelID int64) ([]model.Campaign, error) {
-	var query string
+func parseDate(dStr string) (time.Time, error) {
+	if len(dStr) >= 10 {
+		return time.Parse("2006-01-02", dStr[:10])
+	}
+	return time.Parse("2006-01-02", dStr)
+}
+
+func (r *sqliteRepository) GetCampaigns(ctx context.Context, filter model.CampaignFilter) ([]model.Campaign, int, error) {
+	whereClauses := []string{"1=1"}
 	var args []interface{}
-	if channelID > 0 {
-		query = "SELECT id, channel_id, external_id, name, status, daily_budget, created_at FROM campaigns WHERE channel_id = ?"
-		args = append(args, channelID)
-	} else {
-		query = "SELECT id, channel_id, external_id, name, status, daily_budget, created_at FROM campaigns"
+
+	if filter.ChannelID > 0 {
+		whereClauses = append(whereClauses, "channel_id = ?")
+		args = append(args, filter.ChannelID)
 	}
 
-	rows, err := r.db.QueryContext(ctx, query, args...)
+	if filter.Status != "" {
+		whereClauses = append(whereClauses, "status = ?")
+		args = append(args, filter.Status)
+	}
+
+	if filter.Search != "" {
+		whereClauses = append(whereClauses, "(name LIKE ? OR external_id LIKE ?)")
+		searchTerm := "%" + filter.Search + "%"
+		args = append(args, searchTerm, searchTerm)
+	}
+
+	whereSQL := strings.Join(whereClauses, " AND ")
+
+	countQuery := "SELECT COUNT(*) FROM campaigns WHERE " + whereSQL
+	var totalRecords int
+	if err := r.db.QueryRowContext(ctx, countQuery, args...).Scan(&totalRecords); err != nil {
+		return nil, 0, err
+	}
+
+	page := filter.Page
+	if page < 1 {
+		page = 1
+	}
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 10
+	}
+	offset := (page - 1) * limit
+
+	query := fmt.Sprintf("SELECT id, channel_id, external_id, name, status, daily_budget, created_at FROM campaigns WHERE %s ORDER BY id ASC LIMIT ? OFFSET ?", whereSQL)
+	queryArgs := append(args, limit, offset)
+
+	rows, err := r.db.QueryContext(ctx, query, queryArgs...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 
@@ -304,9 +377,190 @@ func (r *sqliteRepository) GetCampaigns(ctx context.Context, channelID int64) ([
 	for rows.Next() {
 		var c model.Campaign
 		if err := rows.Scan(&c.ID, &c.ChannelID, &c.ExternalID, &c.Name, &c.Status, &c.DailyBudget, &c.CreatedAt); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		campaigns = append(campaigns, c)
 	}
-	return campaigns, nil
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	if campaigns == nil {
+		campaigns = []model.Campaign{}
+	}
+
+	return campaigns, totalRecords, nil
+}
+
+func (r *sqliteRepository) GetAggregatedOverview(ctx context.Context, startDate, endDate time.Time) (float64, float64, float64, int, error) {
+	startStr := startDate.Format("2006-01-02")
+	endStr := endDate.Format("2006-01-02")
+
+	var totalSpend float64
+	spendQuery := "SELECT COALESCE(SUM(spend), 0) FROM daily_ad_metrics WHERE date >= ? AND date <= ?"
+	if err := r.db.QueryRowContext(ctx, spendQuery, startStr, endStr).Scan(&totalSpend); err != nil {
+		return 0, 0, 0, 0, err
+	}
+
+	var totalGMV, totalCOGS float64
+	var totalOrders int
+	salesQuery := "SELECT COALESCE(SUM(gmv), 0), COALESCE(SUM(cogs), 0), COALESCE(SUM(total_orders), 0) FROM daily_sales_metrics WHERE date >= ? AND date <= ?"
+	if err := r.db.QueryRowContext(ctx, salesQuery, startStr, endStr).Scan(&totalGMV, &totalCOGS, &totalOrders); err != nil {
+		return 0, 0, 0, 0, err
+	}
+
+	return totalSpend, totalGMV, totalCOGS, totalOrders, nil
+}
+
+func (r *sqliteRepository) GetAggregatedDailyTrends(ctx context.Context, startDate, endDate time.Time) ([]model.TrendDataPoint, error) {
+	startStr := startDate.Format("2006-01-02")
+	endStr := endDate.Format("2006-01-02")
+
+	query := `
+	SELECT 
+		d.date,
+		COALESCE(ad.total_spend, 0) as spend,
+		COALESCE(s.total_gmv, 0) as gmv,
+		COALESCE(s.total_orders, 0) as total_orders
+	FROM (
+		SELECT date FROM daily_ad_metrics WHERE date >= ? AND date <= ?
+		UNION
+		SELECT date FROM daily_sales_metrics WHERE date >= ? AND date <= ?
+	) d
+	LEFT JOIN (
+		SELECT date, SUM(spend) as total_spend 
+		FROM daily_ad_metrics 
+		WHERE date >= ? AND date <= ? 
+		GROUP BY date
+	) ad ON d.date = ad.date
+	LEFT JOIN (
+		SELECT date, SUM(gmv) as total_gmv, SUM(total_orders) as total_orders 
+		FROM daily_sales_metrics 
+		WHERE date >= ? AND date <= ? 
+		GROUP BY date
+	) s ON d.date = s.date
+	ORDER BY d.date ASC;
+	`
+	rows, err := r.db.QueryContext(ctx, query, startStr, endStr, startStr, endStr, startStr, endStr, startStr, endStr)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	dataMap := make(map[string]model.TrendDataPoint)
+	for rows.Next() {
+		var dStr string
+		var pt model.TrendDataPoint
+		if err := rows.Scan(&dStr, &pt.Spend, &pt.GMV, &pt.TotalOrders); err != nil {
+			return nil, err
+		}
+		t, err := parseDate(dStr)
+		if err == nil {
+			dStr = t.Format("2006-01-02")
+		}
+		pt.Date = dStr
+		dataMap[dStr] = pt
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	var results []model.TrendDataPoint
+	curr := startDate
+	for !curr.After(endDate) {
+		dStr := curr.Format("2006-01-02")
+		pt, ok := dataMap[dStr]
+		if !ok {
+			pt = model.TrendDataPoint{Date: dStr}
+		}
+		if pt.Spend > 0 {
+			pt.BlendedROAS = math.Round((pt.GMV/pt.Spend)*100) / 100
+		}
+		pt.Spend = math.Round(pt.Spend*100) / 100
+		pt.GMV = math.Round(pt.GMV*100) / 100
+		results = append(results, pt)
+		curr = curr.AddDate(0, 0, 1)
+	}
+
+	return results, nil
+}
+
+func (r *sqliteRepository) GetAggregatedChannelSummaries(ctx context.Context, startDate, endDate time.Time) ([]model.ChannelSummary, error) {
+	startStr := startDate.Format("2006-01-02")
+	endStr := endDate.Format("2006-01-02")
+
+	// Query overall total spend and total GMV across entire dataset for consistent denominators
+	var totalSpend, totalGMV float64
+	spendQuery := "SELECT COALESCE(SUM(spend), 0) FROM daily_ad_metrics WHERE date >= ? AND date <= ?"
+	if err := r.db.QueryRowContext(ctx, spendQuery, startStr, endStr).Scan(&totalSpend); err != nil {
+		return nil, err
+	}
+	salesQuery := "SELECT COALESCE(SUM(gmv), 0) FROM daily_sales_metrics WHERE date >= ? AND date <= ?"
+	if err := r.db.QueryRowContext(ctx, salesQuery, startStr, endStr).Scan(&totalGMV); err != nil {
+		return nil, err
+	}
+
+	query := `
+	SELECT 
+		c.code,
+		c.name,
+		COALESCE(ad.total_spend, 0) as total_spend,
+		COALESCE(s.total_gmv, 0) as total_gmv
+	FROM channels c
+	LEFT JOIN (
+		SELECT cmp.channel_id, SUM(m.spend) as total_spend
+		FROM daily_ad_metrics m
+		JOIN campaigns cmp ON m.campaign_id = cmp.id
+		WHERE m.date >= ? AND m.date <= ?
+		GROUP BY cmp.channel_id
+	) ad ON c.id = ad.channel_id
+	LEFT JOIN (
+		SELECT channel_id, SUM(gmv) as total_gmv
+		FROM daily_sales_metrics
+		WHERE date >= ? AND date <= ?
+		GROUP BY channel_id
+	) s ON c.id = s.channel_id
+	ORDER BY c.id ASC;
+	`
+	rows, err := r.db.QueryContext(ctx, query, startStr, endStr, startStr, endStr)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	type channelData struct {
+		code  string
+		name  string
+		spend float64
+		gmv   float64
+	}
+
+	var channelsData []channelData
+	for rows.Next() {
+		var cd channelData
+		if err := rows.Scan(&cd.code, &cd.name, &cd.spend, &cd.gmv); err != nil {
+			return nil, err
+		}
+		channelsData = append(channelsData, cd)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	var summaries []model.ChannelSummary
+	for _, cd := range channelsData {
+		var roas float64
+		if cd.spend > 0 {
+			roas = cd.gmv / cd.spend
+		}
+		summaries = append(summaries, model.ChannelSummary{
+			ChannelCode:       cd.code,
+			ChannelName:       cd.name,
+			TotalSpend:        math.Round(cd.spend*100) / 100,
+			TotalGMV:          math.Round(cd.gmv*100) / 100,
+			ChannelROAS:       math.Round(roas*100) / 100,
+			SpendSharePercent: math.Round((cd.spend/math.Max(totalSpend, 1.0))*10000) / 100,
+			GMVSharePercent:   math.Round((cd.gmv/math.Max(totalGMV, 1.0))*10000) / 100,
+		})
+	}
+	return summaries, nil
 }
