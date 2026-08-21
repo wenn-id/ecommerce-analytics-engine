@@ -480,6 +480,17 @@ func (r *sqliteRepository) GetAggregatedChannelSummaries(ctx context.Context, st
 	startStr := startDate.Format("2006-01-02")
 	endStr := endDate.Format("2006-01-02")
 
+	// Query overall total spend and total GMV across entire dataset for consistent denominators
+	var totalSpend, totalGMV float64
+	spendQuery := "SELECT COALESCE(SUM(spend), 0) FROM daily_ad_metrics WHERE date >= ? AND date <= ?"
+	if err := r.db.QueryRowContext(ctx, spendQuery, startStr, endStr).Scan(&totalSpend); err != nil {
+		return nil, err
+	}
+	salesQuery := "SELECT COALESCE(SUM(gmv), 0) FROM daily_sales_metrics WHERE date >= ? AND date <= ?"
+	if err := r.db.QueryRowContext(ctx, salesQuery, startStr, endStr).Scan(&totalGMV); err != nil {
+		return nil, err
+	}
+
 	query := `
 	SELECT 
 		c.code,
@@ -516,14 +527,11 @@ func (r *sqliteRepository) GetAggregatedChannelSummaries(ctx context.Context, st
 	}
 
 	var channelsData []channelData
-	var totalSpend, totalGMV float64
 	for rows.Next() {
 		var cd channelData
 		if err := rows.Scan(&cd.code, &cd.name, &cd.spend, &cd.gmv); err != nil {
 			return nil, err
 		}
-		totalSpend += cd.spend
-		totalGMV += cd.gmv
 		channelsData = append(channelsData, cd)
 	}
 	if err := rows.Err(); err != nil {

@@ -163,13 +163,18 @@ func TestMetricsHandlerRateLimiting(t *testing.T) {
 	}
 
 	// Verify 429 response through handler
+	received429 := false
 	for i := 0; i < 110; i++ {
 		req := httptest.NewRequest("GET", "/api/v1/health", nil)
 		req.RemoteAddr = "10.0.0.1:12345"
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, req)
-		if i >= 100 && w.Code == http.StatusTooManyRequests {
-			return // Successfully caught 429
+		if w.Code == http.StatusTooManyRequests {
+			received429 = true
+			break
 		}
+	}
+	if !received429 {
+		t.Fatalf("expected HTTP 429 Too Many Requests from rate limiter after exceeding capacity")
 	}
 }
