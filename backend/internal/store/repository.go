@@ -84,6 +84,13 @@ func (r *sqliteRepository) InitSchema(ctx context.Context) error {
 		records_processed INTEGER NOT NULL,
 		error_message TEXT
 	);
+
+	CREATE INDEX IF NOT EXISTS idx_campaigns_channel_id ON campaigns(channel_id);
+	CREATE INDEX IF NOT EXISTS idx_daily_ad_metrics_date ON daily_ad_metrics(date);
+	CREATE INDEX IF NOT EXISTS idx_daily_ad_metrics_campaign_date ON daily_ad_metrics(campaign_id, date);
+	CREATE INDEX IF NOT EXISTS idx_daily_sales_metrics_date ON daily_sales_metrics(date);
+	CREATE INDEX IF NOT EXISTS idx_daily_sales_metrics_channel_date ON daily_sales_metrics(channel_id, date);
+	CREATE INDEX IF NOT EXISTS idx_sync_logs_channel_id ON sync_logs(channel_id);
 	`
 	_, err := r.db.ExecContext(ctx, schema)
 	return err
@@ -129,6 +136,9 @@ func (r *sqliteRepository) GetChannels(ctx context.Context) ([]model.Channel, er
 			ch.LastSyncedAt = &lastSync.Time
 		}
 		channels = append(channels, ch)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return channels, nil
 }
@@ -252,9 +262,15 @@ func (r *sqliteRepository) QueryAdMetrics(ctx context.Context, startDate, endDat
 		if err := rows.Scan(&m.ID, &m.CampaignID, &dStr, &m.Impressions, &m.Clicks, &m.Spend, &m.Conversions, &m.AttributedRevenue); err != nil {
 			return nil, err
 		}
-		t, _ := time.Parse("2006-01-02", dStr)
+		t, err := parseDate(dStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid date format in daily_ad_metrics %q: %w", dStr, err)
+		}
 		m.Date = t
 		results = append(results, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return results, nil
 }
@@ -279,11 +295,24 @@ func (r *sqliteRepository) QuerySalesMetrics(ctx context.Context, startDate, end
 		if err := rows.Scan(&m.ID, &m.ChannelID, &dStr, &m.TotalOrders, &m.GMV, &m.NetSales, &m.COGS, &m.ReturnedOrders); err != nil {
 			return nil, err
 		}
-		t, _ := time.Parse("2006-01-02", dStr)
+		t, err := parseDate(dStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid date format in daily_sales_metrics %q: %w", dStr, err)
+		}
 		m.Date = t
 		results = append(results, m)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return results, nil
+}
+
+func parseDate(dStr string) (time.Time, error) {
+	if len(dStr) >= 10 {
+		return time.Parse("2006-01-02", dStr[:10])
+	}
+	return time.Parse("2006-01-02", dStr)
 }
 
 func (r *sqliteRepository) GetCampaigns(ctx context.Context, filter model.CampaignFilter) ([]model.Campaign, int, error) {
@@ -340,6 +369,9 @@ func (r *sqliteRepository) GetCampaigns(ctx context.Context, filter model.Campai
 			return nil, 0, err
 		}
 		campaigns = append(campaigns, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
 	}
 	if campaigns == nil {
 		campaigns = []model.Campaign{}
