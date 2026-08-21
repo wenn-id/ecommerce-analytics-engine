@@ -89,11 +89,14 @@ func (r *sqliteRepository) InitSchema(ctx context.Context) error {
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_campaigns_channel_id ON campaigns(channel_id);
+	CREATE INDEX IF NOT EXISTS idx_campaigns_status ON campaigns(status);
+	CREATE INDEX IF NOT EXISTS idx_campaigns_name ON campaigns(name);
 	CREATE INDEX IF NOT EXISTS idx_daily_ad_metrics_date ON daily_ad_metrics(date);
 	CREATE INDEX IF NOT EXISTS idx_daily_ad_metrics_campaign_date ON daily_ad_metrics(campaign_id, date);
 	CREATE INDEX IF NOT EXISTS idx_daily_sales_metrics_date ON daily_sales_metrics(date);
 	CREATE INDEX IF NOT EXISTS idx_daily_sales_metrics_channel_date ON daily_sales_metrics(channel_id, date);
 	CREATE INDEX IF NOT EXISTS idx_sync_logs_channel_id ON sync_logs(channel_id);
+	CREATE INDEX IF NOT EXISTS idx_sync_logs_channel_synced ON sync_logs(channel_id, synced_at);
 	`
 	_, err := r.db.ExecContext(ctx, schema)
 	return err

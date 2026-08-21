@@ -38,10 +38,15 @@ func (s *syncService) SyncAll(ctx context.Context, start, end time.Time) error {
 	var wg sync.WaitGroup
 	errChan := make(chan error, len(s.connectors))
 
+	const maxConcurrency = 5
+	sem := make(chan struct{}, maxConcurrency)
+
 	for _, conn := range s.connectors {
 		wg.Add(1)
+		sem <- struct{}{}
 		go func(c connector.PlatformConnector) {
 			defer wg.Done()
+			defer func() { <-sem }()
 			if err := s.syncSingle(ctx, c, start, end); err != nil {
 				log.Printf("Sync failed for channel %s: %v", c.GetChannelCode(), err)
 				errChan <- err

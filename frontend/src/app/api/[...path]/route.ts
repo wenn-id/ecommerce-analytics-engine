@@ -58,11 +58,26 @@ async function proxyRequest(request: NextRequest, pathSegments: string[]) {
   try {
     const response = await fetch(targetUrl, reqInit);
     const data = await response.text();
+
+    const responseHeaders = new Headers();
+    responseHeaders.set('Content-Type', response.headers.get('Content-Type') || 'application/json');
+
+    const cacheControl = response.headers.get('Cache-Control');
+    if (cacheControl) {
+      responseHeaders.set('Cache-Control', cacheControl);
+    }
+    const etag = response.headers.get('ETag');
+    if (etag) {
+      responseHeaders.set('ETag', etag);
+    }
+    const vary = response.headers.get('Vary');
+    if (vary) {
+      responseHeaders.set('Vary', vary);
+    }
+
     return new NextResponse(data, {
       status: response.status,
-      headers: {
-        'Content-Type': response.headers.get('Content-Type') || 'application/json',
-      },
+      headers: responseHeaders,
     });
   } catch (error) {
     return NextResponse.json(

@@ -34,20 +34,48 @@ async function fetchWithTimeout(url: string, init?: RequestInit, timeoutMs = DEF
   }
 }
 
+async function fetchWithRetry(
+  url: string,
+  init?: RequestInit,
+  retries = 2,
+  backoffMs = 300,
+  timeoutMs = DEFAULT_TIMEOUT_MS
+): Promise<Response> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const res = await fetchWithTimeout(url, init, timeoutMs);
+      if (res.status >= 500 && attempt < retries) {
+        await new Promise((resolve) => setTimeout(resolve, backoffMs * Math.pow(2, attempt)));
+        continue;
+      }
+      return res;
+    } catch (err: any) {
+      lastError = err;
+      if (attempt < retries && err?.name !== 'AbortError') {
+        await new Promise((resolve) => setTimeout(resolve, backoffMs * Math.pow(2, attempt)));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastError;
+}
+
 export async function fetchOverview(startDate: string, endDate: string): Promise<OverviewMetrics> {
-  const res = await fetchWithTimeout(`${API_BASE}/metrics/overview?start_date=${startDate}&end_date=${endDate}`);
+  const res = await fetchWithRetry(`${API_BASE}/metrics/overview?start_date=${startDate}&end_date=${endDate}`);
   if (!res.ok) throw new Error('Failed to fetch overview metrics');
   return res.json();
 }
 
 export async function fetchTrend(startDate: string, endDate: string): Promise<TrendDataPoint[]> {
-  const res = await fetchWithTimeout(`${API_BASE}/metrics/trend?start_date=${startDate}&end_date=${endDate}`);
+  const res = await fetchWithRetry(`${API_BASE}/metrics/trend?start_date=${startDate}&end_date=${endDate}`);
   if (!res.ok) throw new Error('Failed to fetch trend data');
   return res.json();
 }
 
 export async function fetchChannels(startDate: string, endDate: string): Promise<ChannelSummary[]> {
-  const res = await fetchWithTimeout(`${API_BASE}/metrics/channels?start_date=${startDate}&end_date=${endDate}`);
+  const res = await fetchWithRetry(`${API_BASE}/metrics/channels?start_date=${startDate}&end_date=${endDate}`);
   if (!res.ok) throw new Error('Failed to fetch channel breakdown');
   return res.json();
 }
@@ -70,7 +98,7 @@ export async function fetchCampaigns(params?: FetchCampaignsParams): Promise<Pag
 
   const query = searchParams.toString();
   const url = `${API_BASE}/campaigns${query ? `?${query}` : ''}`;
-  const res = await fetchWithTimeout(url);
+  const res = await fetchWithRetry(url);
   if (!res.ok) throw new Error('Failed to fetch campaigns');
   return res.json();
 }

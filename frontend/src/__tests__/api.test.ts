@@ -52,4 +52,16 @@ describe('API Client', () => {
       expect.objectContaining({ method: 'POST' })
     );
   });
+
+  it('fetchOverview retries on 500 error before succeeding', async () => {
+    const mockData = { total_spend: 1000 };
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: false, status: 500 } as Response)
+      .mockResolvedValueOnce({ ok: true, json: async () => mockData } as Response);
+
+    const res = await fetchOverview('2026-08-01', '2026-08-21');
+    expect(res).toEqual(mockData);
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+  });
 });
