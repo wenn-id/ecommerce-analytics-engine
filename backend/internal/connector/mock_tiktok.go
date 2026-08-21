@@ -28,15 +28,18 @@ func (t *tikTokConnector) FetchDailyAdMetrics(ctx context.Context, startDate, en
 	var metrics []model.DailyAdMetric
 	curr := startDate
 	for !curr.After(endDate) {
-		spend := 900000.0 + float64(rand.IntN(300000))
-		clicks := 600 + rand.IntN(200)
-		conversions := 35 + rand.IntN(20)
-		roas := 4.8 + (rand.Float64() * 1.8)
+		daySeed := uint64(curr.Unix() / 86400)
+		rng := rand.New(rand.NewPCG(daySeed, 201))
+
+		spend := 900000.0 + float64(rng.IntN(300000))
+		clicks := 600 + rng.IntN(200)
+		conversions := 35 + rng.IntN(20)
+		roas := 4.8 + (rng.Float64() * 1.8)
 
 		metrics = append(metrics, model.DailyAdMetric{
 			CampaignID:        2,
 			Date:              curr,
-			Impressions:       25000 + rand.IntN(8000),
+			Impressions:       25000 + rng.IntN(8000),
 			Clicks:            clicks,
 			Spend:             spend,
 			Conversions:       conversions,
@@ -51,8 +54,11 @@ func (t *tikTokConnector) FetchDailySales(ctx context.Context, startDate, endDat
 	var metrics []model.DailySalesMetric
 	curr := startDate
 	for !curr.After(endDate) {
-		orders := 45 + rand.IntN(25)
-		gmv := float64(orders) * (150000.0 + float64(rand.IntN(30000)))
+		daySeed := uint64(curr.Unix() / 86400)
+		rng := rand.New(rand.NewPCG(daySeed, 202))
+
+		orders := 45 + rng.IntN(25)
+		gmv := float64(orders) * (150000.0 + float64(rng.IntN(30000)))
 		cogs := gmv * 0.42
 		netSales := gmv * 0.94
 
@@ -62,7 +68,7 @@ func (t *tikTokConnector) FetchDailySales(ctx context.Context, startDate, endDat
 			GMV:            gmv,
 			NetSales:       netSales,
 			COGS:           cogs,
-			ReturnedOrders: rand.IntN(4),
+			ReturnedOrders: rng.IntN(4),
 		})
 		curr = curr.AddDate(0, 0, 1)
 	}

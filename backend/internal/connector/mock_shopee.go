@@ -27,15 +27,18 @@ func (s *shopeeConnector) FetchDailyAdMetrics(ctx context.Context, startDate, en
 	var metrics []model.DailyAdMetric
 	curr := startDate
 	for !curr.After(endDate) {
-		spend := 500000.0 + float64(rand.IntN(200000))
-		clicks := 300 + rand.IntN(100)
-		conversions := 20 + rand.IntN(10)
-		roas := 5.2 + (rand.Float64() * 2.0)
+		daySeed := uint64(curr.Unix() / 86400)
+		rng := rand.New(rand.NewPCG(daySeed, 301))
+
+		spend := 500000.0 + float64(rng.IntN(200000))
+		clicks := 300 + rng.IntN(100)
+		conversions := 20 + rng.IntN(10)
+		roas := 5.2 + (rng.Float64() * 2.0)
 
 		metrics = append(metrics, model.DailyAdMetric{
 			CampaignID:        3,
 			Date:              curr,
-			Impressions:       12000 + rand.IntN(3000),
+			Impressions:       12000 + rng.IntN(3000),
 			Clicks:            clicks,
 			Spend:             spend,
 			Conversions:       conversions,
@@ -50,8 +53,11 @@ func (s *shopeeConnector) FetchDailySales(ctx context.Context, startDate, endDat
 	var metrics []model.DailySalesMetric
 	curr := startDate
 	for !curr.After(endDate) {
-		orders := 35 + rand.IntN(15)
-		gmv := float64(orders) * (140000.0 + float64(rand.IntN(25000)))
+		daySeed := uint64(curr.Unix() / 86400)
+		rng := rand.New(rand.NewPCG(daySeed, 302))
+
+		orders := 35 + rng.IntN(15)
+		gmv := float64(orders) * (140000.0 + float64(rng.IntN(25000)))
 		cogs := gmv * 0.44
 		netSales := gmv * 0.93
 
@@ -61,7 +67,7 @@ func (s *shopeeConnector) FetchDailySales(ctx context.Context, startDate, endDat
 			GMV:            gmv,
 			NetSales:       netSales,
 			COGS:           cogs,
-			ReturnedOrders: rand.IntN(2),
+			ReturnedOrders: rng.IntN(2),
 		})
 		curr = curr.AddDate(0, 0, 1)
 	}
