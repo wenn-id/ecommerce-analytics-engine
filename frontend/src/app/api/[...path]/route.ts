@@ -30,7 +30,7 @@ async function proxyRequest(request: NextRequest, pathSegments: string[]) {
     headers.set('X-API-Key', SERVER_API_KEY);
   }
 
-  const clientIp = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || request.ip || '127.0.0.1';
+  const clientIp = request.ip || '127.0.0.1';
   headers.set('X-Forwarded-For', clientIp);
 
   const reqInit: RequestInit = {
