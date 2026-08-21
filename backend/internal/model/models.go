@@ -78,3 +78,23 @@ type ChannelSummary struct {
 	SpendSharePercent float64 `json:"spend_share_percent"`
 	GMVSharePercent   float64 `json:"gmv_share_percent"`
 }
+
+type PaginationMeta struct {
+	CurrentPage  int `json:"current_page"`
+	Limit        int `json:"limit"`
+	TotalRecords int `json:"total_records"`
+	TotalPages   int `json:"total_pages"`
+}
+
+type PaginatedCampaigns struct {
+	Data       []Campaign     `json:"data"`
+	Pagination PaginationMeta `json:"pagination"`
+}
+
+type CampaignFilter struct {
+	ChannelID int64
+	Search    string
+	Status    string
+	Page      int
+	Limit     int
+}

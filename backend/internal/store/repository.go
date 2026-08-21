@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"database/sql"
+	"fmt"
+	"strings"
 	"time"
 
 	"ecommerce-analytics/internal/model"
@@ -18,7 +20,7 @@ type Repository interface {
 	InsertSyncLog(ctx context.Context, log model.SyncLog) error
 	QueryAdMetrics(ctx context.Context, startDate, endDate time.Time) ([]model.DailyAdMetric, error)
 	QuerySalesMetrics(ctx context.Context, startDate, endDate time.Time) ([]model.DailySalesMetric, error)
-	GetCampaigns(ctx context.Context, channelID int64) ([]model.Campaign, error)
+	GetCampaigns(ctx context.Context, filter model.CampaignFilter) ([]model.Campaign, int, error)
 }
 
 type sqliteRepository struct {
@@ -284,19 +286,50 @@ func (r *sqliteRepository) QuerySalesMetrics(ctx context.Context, startDate, end
 	return results, nil
 }
 
-func (r *sqliteRepository) GetCampaigns(ctx context.Context, channelID int64) ([]model.Campaign, error) {
-	var query string
+func (r *sqliteRepository) GetCampaigns(ctx context.Context, filter model.CampaignFilter) ([]model.Campaign, int, error) {
+	whereClauses := []string{"1=1"}
 	var args []interface{}
-	if channelID > 0 {
-		query = "SELECT id, channel_id, external_id, name, status, daily_budget, created_at FROM campaigns WHERE channel_id = ?"
-		args = append(args, channelID)
-	} else {
-		query = "SELECT id, channel_id, external_id, name, status, daily_budget, created_at FROM campaigns"
+
+	if filter.ChannelID > 0 {
+		whereClauses = append(whereClauses, "channel_id = ?")
+		args = append(args, filter.ChannelID)
 	}
 
-	rows, err := r.db.QueryContext(ctx, query, args...)
+	if filter.Status != "" {
+		whereClauses = append(whereClauses, "status = ?")
+		args = append(args, filter.Status)
+	}
+
+	if filter.Search != "" {
+		whereClauses = append(whereClauses, "(name LIKE ? OR external_id LIKE ?)")
+		searchTerm := "%" + filter.Search + "%"
+		args = append(args, searchTerm, searchTerm)
+	}
+
+	whereSQL := strings.Join(whereClauses, " AND ")
+
+	countQuery := "SELECT COUNT(*) FROM campaigns WHERE " + whereSQL
+	var totalRecords int
+	if err := r.db.QueryRowContext(ctx, countQuery, args...).Scan(&totalRecords); err != nil {
+		return nil, 0, err
+	}
+
+	page := filter.Page
+	if page < 1 {
+		page = 1
+	}
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 10
+	}
+	offset := (page - 1) * limit
+
+	query := fmt.Sprintf("SELECT id, channel_id, external_id, name, status, daily_budget, created_at FROM campaigns WHERE %s ORDER BY id ASC LIMIT ? OFFSET ?", whereSQL)
+	queryArgs := append(args, limit, offset)
+
+	rows, err := r.db.QueryContext(ctx, query, queryArgs...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 
@@ -304,9 +337,13 @@ func (r *sqliteRepository) GetCampaigns(ctx context.Context, channelID int64) ([
 	for rows.Next() {
 		var c model.Campaign
 		if err := rows.Scan(&c.ID, &c.ChannelID, &c.ExternalID, &c.Name, &c.Status, &c.DailyBudget, &c.CreatedAt); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		campaigns = append(campaigns, c)
 	}
-	return campaigns, nil
+	if campaigns == nil {
+		campaigns = []model.Campaign{}
+	}
+
+	return campaigns, totalRecords, nil
 }
