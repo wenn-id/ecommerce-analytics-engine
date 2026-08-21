@@ -29,8 +29,13 @@ export default function DashboardPage() {
   const [refreshTrigger, setRefreshTrigger] = useState(0);
 
   const requestGenRef = useRef(0);
+  const datesRef = useRef(dates);
 
-  const loadData = async (startDate = dates.startDate, endDate = dates.endDate) => {
+  useEffect(() => {
+    datesRef.current = dates;
+  }, [dates]);
+
+  const loadData = async (startDate = datesRef.current.startDate, endDate = datesRef.current.endDate) => {
     const currentGen = ++requestGenRef.current;
     setLoading(true);
     setError(null);
@@ -67,7 +72,7 @@ export default function DashboardPage() {
     setSyncing(true);
     try {
       await triggerSync();
-      await loadData(dates.startDate, dates.endDate);
+      await loadData(datesRef.current.startDate, datesRef.current.endDate);
       setRefreshTrigger((prev) => prev + 1);
     } catch (err) {
       console.error('Failed to trigger sync:', err);

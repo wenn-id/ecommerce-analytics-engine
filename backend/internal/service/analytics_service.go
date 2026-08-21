@@ -24,27 +24,9 @@ func NewAnalyticsService(repo store.Repository) AnalyticsService {
 }
 
 func (s *analyticsService) GetOverviewMetrics(ctx context.Context, start, end time.Time) (*model.OverviewMetrics, error) {
-	adMetrics, err := s.repo.QueryAdMetrics(ctx, start, end)
+	totalSpend, totalGMV, totalCOGS, totalOrders, err := s.repo.GetAggregatedOverview(ctx, start, end)
 	if err != nil {
 		return nil, err
-	}
-
-	salesMetrics, err := s.repo.QuerySalesMetrics(ctx, start, end)
-	if err != nil {
-		return nil, err
-	}
-
-	var totalSpend float64
-	for _, m := range adMetrics {
-		totalSpend += m.Spend
-	}
-
-	var totalGMV, totalCOGS float64
-	var totalOrders int
-	for _, sm := range salesMetrics {
-		totalGMV += sm.GMV
-		totalCOGS += sm.COGS
-		totalOrders += sm.TotalOrders
 	}
 
 	var blendedROAS, avgCPA, acos float64
@@ -71,121 +53,11 @@ func (s *analyticsService) GetOverviewMetrics(ctx context.Context, start, end ti
 }
 
 func (s *analyticsService) GetTrendData(ctx context.Context, start, end time.Time) ([]model.TrendDataPoint, error) {
-	adMetrics, err := s.repo.QueryAdMetrics(ctx, start, end)
-	if err != nil {
-		return nil, err
-	}
-	salesMetrics, err := s.repo.QuerySalesMetrics(ctx, start, end)
-	if err != nil {
-		return nil, err
-	}
-
-	dailyMap := make(map[string]*model.TrendDataPoint)
-	curr := start
-	for !curr.After(end) {
-		dStr := curr.Format("2006-01-02")
-		dailyMap[dStr] = &model.TrendDataPoint{Date: dStr}
-		curr = curr.AddDate(0, 0, 1)
-	}
-
-	for _, a := range adMetrics {
-		dStr := a.Date.Format("2006-01-02")
-		if pt, ok := dailyMap[dStr]; ok {
-			pt.Spend += a.Spend
-		}
-	}
-
-	for _, sm := range salesMetrics {
-		dStr := sm.Date.Format("2006-01-02")
-		if pt, ok := dailyMap[dStr]; ok {
-			pt.GMV += sm.GMV
-			pt.TotalOrders += sm.TotalOrders
-		}
-	}
-
-	var results []model.TrendDataPoint
-	curr = start
-	for !curr.After(end) {
-		dStr := curr.Format("2006-01-02")
-		pt := dailyMap[dStr]
-		if pt.Spend > 0 {
-			pt.BlendedROAS = round2(pt.GMV / pt.Spend)
-		}
-		pt.Spend = round2(pt.Spend)
-		pt.GMV = round2(pt.GMV)
-		results = append(results, *pt)
-		curr = curr.AddDate(0, 0, 1)
-	}
-
-	return results, nil
+	return s.repo.GetAggregatedDailyTrends(ctx, start, end)
 }
 
 func (s *analyticsService) GetChannelBreakdown(ctx context.Context, start, end time.Time) ([]model.ChannelSummary, error) {
-	channels, err := s.repo.GetChannels(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	adMetrics, err := s.repo.QueryAdMetrics(ctx, start, end)
-	if err != nil {
-		return nil, err
-	}
-	salesMetrics, err := s.repo.QuerySalesMetrics(ctx, start, end)
-	if err != nil {
-		return nil, err
-	}
-
-	campaigns, _, err := s.repo.GetCampaigns(ctx, model.CampaignFilter{Limit: 10000})
-	if err != nil {
-		return nil, err
-	}
-
-	campaignToChannel := make(map[int64]int64, len(campaigns))
-	for _, c := range campaigns {
-		campaignToChannel[c.ID] = c.ChannelID
-	}
-
-	var totalSpend, totalGMV float64
-	for _, a := range adMetrics {
-		totalSpend += a.Spend
-	}
-	for _, sm := range salesMetrics {
-		totalGMV += sm.GMV
-	}
-
-	channelSpendMap := make(map[int64]float64)
-	for _, a := range adMetrics {
-		if chID, ok := campaignToChannel[a.CampaignID]; ok {
-			channelSpendMap[chID] += a.Spend
-		}
-	}
-
-	channelGMVMap := make(map[int64]float64)
-	for _, sm := range salesMetrics {
-		channelGMVMap[sm.ChannelID] += sm.GMV
-	}
-
-	var summaries []model.ChannelSummary
-	for _, ch := range channels {
-		chSpend := channelSpendMap[ch.ID]
-		chGMV := channelGMVMap[ch.ID]
-
-		var roas float64
-		if chSpend > 0 {
-			roas = chGMV / chSpend
-		}
-
-		summaries = append(summaries, model.ChannelSummary{
-			ChannelCode:       ch.Code,
-			ChannelName:       ch.Name,
-			TotalSpend:        round2(chSpend),
-			TotalGMV:          round2(chGMV),
-			ChannelROAS:       round2(roas),
-			SpendSharePercent: round2((chSpend / math.Max(totalSpend, 1.0)) * 100.0),
-			GMVSharePercent:   round2((chGMV / math.Max(totalGMV, 1.0)) * 100.0),
-		})
-	}
-	return summaries, nil
+	return s.repo.GetAggregatedChannelSummaries(ctx, start, end)
 }
 
 func round2(val float64) float64 {
