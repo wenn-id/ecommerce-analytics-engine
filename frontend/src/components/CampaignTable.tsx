@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Search, ChevronLeft, ChevronRight, Filter, Inbox } from 'lucide-react';
 import { Campaign, PaginationMeta } from '../types/analytics';
 import { fetchCampaigns } from '../lib/api';
@@ -25,6 +25,8 @@ export const CampaignTable: React.FC<CampaignTableProps> = ({ refreshTrigger }) 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  const requestGenRef = useRef(0);
+
   // Debounce search input by 300ms
   useEffect(() => {
     const handler = setTimeout(() => {
@@ -35,6 +37,7 @@ export const CampaignTable: React.FC<CampaignTableProps> = ({ refreshTrigger }) 
   }, [search]);
 
   const loadCampaigns = useCallback(async () => {
+    const currentGen = ++requestGenRef.current;
     setLoading(true);
     setError(null);
     try {
@@ -44,6 +47,9 @@ export const CampaignTable: React.FC<CampaignTableProps> = ({ refreshTrigger }) 
         search: debouncedSearch.trim() || undefined,
         status: status || undefined,
       });
+      if (currentGen !== requestGenRef.current) {
+        return;
+      }
       setCampaigns(res.data || []);
       setPagination(res.pagination || {
         current_page: page,
@@ -52,10 +58,14 @@ export const CampaignTable: React.FC<CampaignTableProps> = ({ refreshTrigger }) 
         total_pages: 0,
       });
     } catch (err) {
-      console.error('Failed to load campaigns:', err);
-      setError('Failed to load campaigns. Please try again.');
+      if (currentGen === requestGenRef.current) {
+        console.error('Failed to load campaigns:', err);
+        setError('Failed to load campaigns. Please try again.');
+      }
     } finally {
-      setLoading(false);
+      if (currentGen === requestGenRef.current) {
+        setLoading(false);
+      }
     }
   }, [page, limit, debouncedSearch, status]);
 

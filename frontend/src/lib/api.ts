@@ -76,9 +76,13 @@ export async function fetchCampaigns(params?: FetchCampaignsParams): Promise<Pag
 }
 
 export async function triggerSync(): Promise<{ status: string }> {
-  const res = await fetchWithTimeout(`${API_BASE}/sync`, {
-    method: 'POST',
-  });
+  const res = await fetchWithTimeout(
+    `${API_BASE}/sync`,
+    {
+      method: 'POST',
+    },
+    60000 // 60s timeout for complete multi-channel sync
+  );
   if (!res.ok) throw new Error('Failed to trigger sync');
   return res.json();
 }

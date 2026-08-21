@@ -28,6 +28,16 @@ async function proxyRequest(request: NextRequest, pathSegments: string[]) {
   headers.set('Content-Type', 'application/json');
   if (SERVER_API_KEY) {
     headers.set('X-API-Key', SERVER_API_KEY);
+  } else if (request.headers.get('x-api-key')) {
+    headers.set('X-API-Key', request.headers.get('x-api-key')!);
+  }
+
+  const requestedWith = request.headers.get('x-requested-with') || 'XMLHttpRequest';
+  headers.set('X-Requested-With', requestedWith);
+
+  const csrfToken = request.headers.get('x-csrf-token');
+  if (csrfToken) {
+    headers.set('X-CSRF-Token', csrfToken);
   }
 
   const clientIp = request.ip || '127.0.0.1';
