@@ -29,6 +29,7 @@ export default function DashboardPage() {
   const [refreshTrigger, setRefreshTrigger] = useState(0);
 
   const requestGenRef = useRef(0);
+<<<<<<< HEAD
   const datesRef = useRef(dates);
 
   useEffect(() => {
@@ -36,6 +37,10 @@ export default function DashboardPage() {
   }, [dates]);
 
   const loadData = async (startDate = datesRef.current.startDate, endDate = datesRef.current.endDate) => {
+=======
+
+  const loadData = async (startDate = dates.startDate, endDate = dates.endDate) => {
+>>>>>>> origin/main
     const currentGen = ++requestGenRef.current;
     setLoading(true);
     setError(null);
