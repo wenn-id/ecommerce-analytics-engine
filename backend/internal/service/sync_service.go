@@ -106,9 +106,11 @@ func (s *syncService) syncSingle(ctx context.Context, conn connector.PlatformCon
 
 	// Retrieve campaign mapping for this channel to correctly link ad metrics
 	dbCampaigns, _, err := s.repo.GetCampaigns(ctx, model.CampaignFilter{ChannelID: chID, Limit: 100})
-	var primaryCampaignID int64
-	if err == nil && len(dbCampaigns) > 0 {
-		primaryCampaignID = dbCampaigns[0].ID
+	campaignIDs := make([]int64, 0, len(dbCampaigns))
+	if err == nil {
+		for _, c := range dbCampaigns {
+			campaignIDs = append(campaignIDs, c.ID)
+		}
 	}
 
 	// 2. Fetch & Upsert Ad Metrics
@@ -117,11 +119,19 @@ func (s *syncService) syncSingle(ctx context.Context, conn connector.PlatformCon
 		log.Printf("Error fetching ad metrics for %s: %v", channelCode, err)
 		syncErrors = append(syncErrors, fmt.Sprintf("fetch ad metrics: %v", err))
 	} else {
-		for i := range adMetrics {
-			if primaryCampaignID > 0 {
-				adMetrics[i].CampaignID = primaryCampaignID
-			} else {
-				adMetrics[i].CampaignID = chID
+		if len(campaignIDs) > 0 {
+			for i := range adMetrics {
+				rawID := int(adMetrics[i].CampaignID)
+				if rawID > 0 && rawID <= len(campaignIDs) {
+					adMetrics[i].CampaignID = campaignIDs[rawID-1]
+				} else {
+					// Distribute across channel's available campaigns
+					mappedIdx := (rawID - 1) % len(campaignIDs)
+					if mappedIdx < 0 {
+						mappedIdx = 0
+					}
+					adMetrics[i].CampaignID = campaignIDs[mappedIdx]
+				}
 			}
 		}
 		if err := s.repo.UpsertAdMetrics(ctx, adMetrics); err != nil {
