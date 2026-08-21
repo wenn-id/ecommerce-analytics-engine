@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"time"
 
+	"ecommerce-analytics/internal/model"
 	"ecommerce-analytics/internal/service"
 	"ecommerce-analytics/internal/store"
 )
@@ -120,17 +121,61 @@ func (h *MetricsHandler) handleCampaigns(w http.ResponseWriter, r *http.Request)
 		jsonError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	chIDStr := r.URL.Query().Get("channel_id")
+
+	query := r.URL.Query()
+	chIDStr := query.Get("channel_id")
 	var chID int64
 	if chIDStr != "" {
 		chID, _ = strconv.ParseInt(chIDStr, 10, 64)
 	}
-	data, err := h.repo.GetCampaigns(r.Context(), chID)
+
+	status := query.Get("status")
+	search := query.Get("search")
+
+	page := 1
+	if pStr := query.Get("page"); pStr != "" {
+		if p, err := strconv.Atoi(pStr); err == nil && p > 0 {
+			page = p
+		}
+	}
+
+	limit := 10
+	if lStr := query.Get("limit"); lStr != "" {
+		if l, err := strconv.Atoi(lStr); err == nil && l > 0 {
+			limit = l
+		}
+	}
+
+	filter := model.CampaignFilter{
+		ChannelID: chID,
+		Status:    status,
+		Search:    search,
+		Page:      page,
+		Limit:     limit,
+	}
+
+	campaigns, totalRecords, err := h.repo.GetCampaigns(r.Context(), filter)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	jsonResponse(w, http.StatusOK, data)
+
+	totalPages := 0
+	if totalRecords > 0 {
+		totalPages = (totalRecords + limit - 1) / limit
+	}
+
+	response := model.PaginatedCampaigns{
+		Data: campaigns,
+		Pagination: model.PaginationMeta{
+			CurrentPage:  page,
+			Limit:        limit,
+			TotalRecords: totalRecords,
+			TotalPages:   totalPages,
+		},
+	}
+
+	jsonResponse(w, http.StatusOK, response)
 }
 
 func (h *MetricsHandler) handleSync(w http.ResponseWriter, r *http.Request) {
