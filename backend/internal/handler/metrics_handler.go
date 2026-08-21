@@ -5,7 +5,6 @@ import (
 	"log"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"ecommerce-analytics/internal/config"
@@ -15,7 +14,7 @@ import (
 )
 
 type MetricsHandler struct {
-	mux          *http.ServeMux
+	handler      http.Handler
 	analyticsSvc service.AnalyticsService
 	syncSvc      service.SyncService
 	repo         store.Repository
@@ -27,77 +26,40 @@ func NewMetricsHandler(analyticsSvc service.AnalyticsService, syncSvc service.Sy
 	if cfg == nil {
 		cfg = config.Load()
 	}
+	mux := http.NewServeMux()
+	limiter := NewRateLimiter(50, 100)
+
 	h := &MetricsHandler{
-		mux:          http.NewServeMux(),
 		analyticsSvc: analyticsSvc,
 		syncSvc:      syncSvc,
 		repo:         repo,
 		cfg:          cfg,
-		limiter:      NewRateLimiter(50, 100),
+		limiter:      limiter,
 	}
-	h.registerRoutes()
+	h.registerRoutes(mux)
+
+	h.handler = Chain(
+		mux,
+		RecoveryMiddleware,
+		LoggingMiddleware,
+		CORSMiddleware(cfg),
+		RateLimitMiddleware(limiter),
+		AuthMiddleware(cfg),
+	)
 	return h
 }
 
 func (h *MetricsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	origin := r.Header.Get("Origin")
-	if origin != "" {
-		allowed := false
-		for _, o := range h.cfg.AllowedOrigins {
-			if o == "*" || o == origin {
-				allowed = true
-				break
-			}
-		}
-		if allowed {
-			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Vary", "Origin")
-		}
-	} else if len(h.cfg.AllowedOrigins) > 0 && h.cfg.AllowedOrigins[0] == "*" {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-	}
-
-	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
-
-	if r.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-
-	// Rate limiting check
-	clientIP := getClientIP(r)
-	if h.limiter != nil && !h.limiter.Allow(clientIP) {
-		w.Header().Set("Retry-After", "1")
-		jsonError(w, http.StatusTooManyRequests, "rate limit exceeded, please retry later")
-		return
-	}
-
-	// Optional API key authentication
-	if h.cfg.APIKey != "" && r.URL.Path != "/api/v1/health" {
-		reqKey := r.Header.Get("X-API-Key")
-		if reqKey == "" {
-			authHeader := r.Header.Get("Authorization")
-			if strings.HasPrefix(authHeader, "Bearer ") {
-				reqKey = strings.TrimPrefix(authHeader, "Bearer ")
-			}
-		}
-		if reqKey != h.cfg.APIKey {
-			jsonError(w, http.StatusUnauthorized, "unauthorized: invalid or missing API key")
-			return
-		}
-	}
-
-	h.mux.ServeHTTP(w, r)
+	h.handler.ServeHTTP(w, r)
 }
 
-func (h *MetricsHandler) registerRoutes() {
-	h.mux.HandleFunc("/api/v1/health", h.handleHealth)
-	h.mux.HandleFunc("/api/v1/metrics/overview", h.handleOverview)
-	h.mux.HandleFunc("/api/v1/metrics/trend", h.handleTrend)
-	h.mux.HandleFunc("/api/v1/metrics/channels", h.handleChannels)
-	h.mux.HandleFunc("/api/v1/campaigns", h.handleCampaigns)
-	h.mux.HandleFunc("/api/v1/sync", h.handleSync)
+func (h *MetricsHandler) registerRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("/api/v1/health", h.handleHealth)
+	mux.HandleFunc("/api/v1/metrics/overview", h.handleOverview)
+	mux.HandleFunc("/api/v1/metrics/trend", h.handleTrend)
+	mux.HandleFunc("/api/v1/metrics/channels", h.handleChannels)
+	mux.HandleFunc("/api/v1/campaigns", h.handleCampaigns)
+	mux.HandleFunc("/api/v1/sync", h.handleSync)
 }
 
 func (h *MetricsHandler) parseDateRange(r *http.Request) (time.Time, time.Time) {
@@ -128,6 +90,7 @@ func (h *MetricsHandler) handleOverview(w http.ResponseWriter, r *http.Request) 
 		jsonError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	w.Header().Set("Cache-Control", "public, max-age=60")
 	start, end := h.parseDateRange(r)
 	data, err := h.analyticsSvc.GetOverviewMetrics(r.Context(), start, end)
 	if err != nil {
@@ -143,6 +106,7 @@ func (h *MetricsHandler) handleTrend(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	w.Header().Set("Cache-Control", "public, max-age=60")
 	start, end := h.parseDateRange(r)
 	data, err := h.analyticsSvc.GetTrendData(r.Context(), start, end)
 	if err != nil {
@@ -158,6 +122,7 @@ func (h *MetricsHandler) handleChannels(w http.ResponseWriter, r *http.Request) 
 		jsonError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	w.Header().Set("Cache-Control", "public, max-age=60")
 	start, end := h.parseDateRange(r)
 	data, err := h.analyticsSvc.GetChannelBreakdown(r.Context(), start, end)
 	if err != nil {
@@ -173,6 +138,7 @@ func (h *MetricsHandler) handleCampaigns(w http.ResponseWriter, r *http.Request)
 		jsonError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	w.Header().Set("Cache-Control", "public, max-age=30")
 
 	query := r.URL.Query()
 	chIDStr := query.Get("channel_id")
