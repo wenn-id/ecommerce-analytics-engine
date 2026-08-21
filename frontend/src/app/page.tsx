@@ -133,7 +133,16 @@ export default function DashboardPage() {
           </div>
         )}
 
-        {overview && (
+        {loading && !overview ? (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
+            {Array.from({ length: 5 }).map((_, i) => (
+              <div key={i} className="bg-white p-6 rounded-xl border border-gray-100 shadow-sm animate-pulse space-y-3">
+                <div className="h-4 bg-gray-200 rounded w-1/2"></div>
+                <div className="h-7 bg-gray-200 rounded w-3/4"></div>
+              </div>
+            ))}
+          </div>
+        ) : overview ? (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
             <MetricCard title="Total Ad Spend" value={`Rp ${(overview.total_spend / 1000000).toFixed(1)}M`} icon={DollarSign} />
             <MetricCard title="Total GMV" value={`Rp ${(overview.total_gmv / 1000000).toFixed(1)}M`} icon={ShoppingCart} />
@@ -141,7 +150,7 @@ export default function DashboardPage() {
             <MetricCard title="Average CPA" value={`Rp ${overview.avg_cpa.toLocaleString('id-ID')}`} icon={Percent} />
             <MetricCard title="Net Contribution Margin" value={`Rp ${(overview.net_margin / 1000000).toFixed(1)}M`} icon={Layers} />
           </div>
-        )}
+        ) : null}
 
         <TrendChart data={trend} />
 

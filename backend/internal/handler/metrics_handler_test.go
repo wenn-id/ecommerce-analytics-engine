@@ -178,3 +178,34 @@ func TestMetricsHandlerRateLimiting(t *testing.T) {
 		t.Fatalf("expected HTTP 429 Too Many Requests from rate limiter after exceeding capacity")
 	}
 }
+
+func TestMetricsHandlerCSRF(t *testing.T) {
+	ctx := context.Background()
+	db, _ := store.NewDB(":memory:")
+	defer db.Close()
+
+	repo := store.NewRepository(db)
+	_ = repo.InitSchema(ctx)
+	conns := []connector.PlatformConnector{connector.NewMetaConnector()}
+	syncSvc := service.NewSyncService(repo, conns)
+	analyticsSvc := service.NewAnalyticsService(repo)
+
+	h := handler.NewMetricsHandler(analyticsSvc, syncSvc, repo, nil)
+
+	// POST /sync without custom header should fail with 403 Forbidden
+	reqNoHeader := httptest.NewRequest("POST", "/api/v1/sync", nil)
+	wNoHeader := httptest.NewRecorder()
+	h.ServeHTTP(wNoHeader, reqNoHeader)
+	if wNoHeader.Code != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden without CSRF header, got %d", wNoHeader.Code)
+	}
+
+	// POST /sync with X-Requested-With should succeed with 200 OK
+	reqWithHeader := httptest.NewRequest("POST", "/api/v1/sync", nil)
+	reqWithHeader.Header.Set("X-Requested-With", "XMLHttpRequest")
+	wWithHeader := httptest.NewRecorder()
+	h.ServeHTTP(wWithHeader, reqWithHeader)
+	if wWithHeader.Code != http.StatusOK {
+		t.Errorf("expected 200 OK with X-Requested-With header, got %d", wWithHeader.Code)
+	}
+}
