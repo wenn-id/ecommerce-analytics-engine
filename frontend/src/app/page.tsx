@@ -2,6 +2,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { DollarSign, ShoppingCart, TrendingUp, Percent, RefreshCw, Layers, Calendar, AlertTriangle } from 'lucide-react';
 import { fetchOverview, fetchTrend, fetchChannels, triggerSync } from '../lib/api';
+import { formatIDR } from '../lib/utils';
 import { OverviewMetrics, TrendDataPoint, ChannelSummary } from '../types/analytics';
 import { MetricCard } from '../components/MetricCard';
 import { TrendChart } from '../components/TrendChart';
@@ -147,7 +148,7 @@ export default function DashboardPage() {
             <MetricCard title="Total Ad Spend" value={`Rp ${(overview.total_spend / 1000000).toFixed(1)}M`} icon={DollarSign} />
             <MetricCard title="Total GMV" value={`Rp ${(overview.total_gmv / 1000000).toFixed(1)}M`} icon={ShoppingCart} />
             <MetricCard title="Blended ROAS" value={`${overview.blended_roas}x`} icon={TrendingUp} trendPositive={overview.blended_roas >= 4} />
-            <MetricCard title="Average CPA" value={`Rp ${overview.avg_cpa.toLocaleString('id-ID')}`} icon={Percent} />
+            <MetricCard title="Average CPA" value={formatIDR(overview.avg_cpa)} icon={Percent} />
             <MetricCard title="Net Contribution Margin" value={`Rp ${(overview.net_margin / 1000000).toFixed(1)}M`} icon={Layers} />
           </div>
         ) : null}

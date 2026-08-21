@@ -1,0 +1,247 @@
+openapi: 3.0.3
+info:
+  title: E-Commerce Analytics Engine API
+  description: High-performance multi-channel marketing & sales analytics engine.
+  version: 1.0.0
+servers:
+  - url: http://localhost:8080/api/v1
+    description: Local Backend Server
+  - url: /api
+    description: Next.js Frontend BFF Proxy
+paths:
+  /health:
+    get:
+      summary: Health check endpoint
+      description: Returns server and database health status.
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  database:
+                    type: string
+                    example: ok
+                  timestamp:
+                    type: string
+                    format: date-time
+
+  /metrics/overview:
+    get:
+      summary: High-level overview metrics
+      description: Computes aggregate ad spend, GMV, blended ROAS, CPA, and net margin across all channels.
+      parameters:
+        - name: start_date
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+            example: "2026-08-01"
+        - name: end_date
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+            example: "2026-08-21"
+      responses:
+        '200':
+          description: Overview metrics successfully calculated
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                example: "public, max-age=60"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total_spend:
+                    type: number
+                  total_gmv:
+                    type: number
+                  blended_roas:
+                    type: number
+                  total_orders:
+                    type: integer
+                  avg_cpa:
+                    type: number
+                  acos:
+                    type: number
+                  net_margin:
+                    type: number
+
+  /metrics/trend:
+    get:
+      summary: Daily analytics trends
+      description: Returns chronological daily time-series spend, GMV, ROAS, and order metrics.
+      parameters:
+        - name: start_date
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: end_date
+          in: query
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: Daily trends list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    date:
+                      type: string
+                    spend:
+                      type: number
+                    gmv:
+                      type: number
+                    blended_roas:
+                      type: number
+                    total_orders:
+                      type: integer
+
+  /metrics/channels:
+    get:
+      summary: Channel breakdown
+      description: Returns performance metrics and share percentage grouped by channel.
+      parameters:
+        - name: start_date
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: end_date
+          in: query
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: Channel summary list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    channel_code:
+                      type: string
+                    channel_name:
+                      type: string
+                    total_spend:
+                      type: number
+                    total_gmv:
+                      type: number
+                    channel_roas:
+                      type: number
+                    spend_share_percent:
+                      type: number
+                    gmv_share_percent:
+                      type: number
+
+  /campaigns:
+    get:
+      summary: Paginated campaigns list
+      description: Returns paginated marketing campaigns with search and status filtering.
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 10
+        - name: search
+          in: query
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            type: string
+        - name: channel_id
+          in: query
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Paginated campaign list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: integer
+                        channel_id:
+                          type: integer
+                        external_id:
+                          type: string
+                        name:
+                          type: string
+                        status:
+                          type: string
+                        daily_budget:
+                          type: number
+                  pagination:
+                    type: object
+                    properties:
+                      current_page:
+                        type: integer
+                      limit:
+                        type: integer
+                      total_records:
+                        type: integer
+                      total_pages:
+                        type: integer
+
+  /sync:
+    post:
+      summary: Trigger data synchronization
+      description: Triggers synchronous data ingestion from all marketing and sales connectors.
+      parameters:
+        - name: X-Requested-With
+          in: header
+          required: false
+          schema:
+            type: string
+            example: XMLHttpRequest
+      responses:
+        '200':
+          description: Sync completed successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: sync_completed
+                  timestamp:
+                    type: string
+                    format: date-time
+        '403':
+          description: Forbidden (CSRF protection failed)

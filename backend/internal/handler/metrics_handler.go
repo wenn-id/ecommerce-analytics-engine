@@ -82,7 +82,23 @@ func (h *MetricsHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	jsonResponse(w, http.StatusOK, map[string]string{"status": "ok", "timestamp": time.Now().Format(time.RFC3339)})
+	dbStatus := "ok"
+	statusCode := http.StatusOK
+	overallStatus := "ok"
+
+	if h.repo != nil {
+		if err := h.repo.Ping(r.Context()); err != nil {
+			log.Printf("Health check: database ping failed: %v", err)
+			dbStatus = "unavailable"
+			overallStatus = "unhealthy"
+			statusCode = http.StatusServiceUnavailable
+		}
+	}
+	jsonResponse(w, statusCode, map[string]string{
+		"status":    overallStatus,
+		"database":  dbStatus,
+		"timestamp": time.Now().Format(time.RFC3339),
+	})
 }
 
 func (h *MetricsHandler) handleOverview(w http.ResponseWriter, r *http.Request) {

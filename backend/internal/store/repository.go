@@ -13,6 +13,7 @@ import (
 
 type Repository interface {
 	InitSchema(ctx context.Context) error
+	Ping(ctx context.Context) error
 	GetChannels(ctx context.Context) ([]model.Channel, error)
 	UpsertChannel(ctx context.Context, ch model.Channel) (int64, error)
 	UpsertCampaigns(ctx context.Context, campaigns []model.Campaign) error
@@ -32,6 +33,10 @@ type sqliteRepository struct {
 
 func NewRepository(db *sql.DB) Repository {
 	return &sqliteRepository{db: db}
+}
+
+func (r *sqliteRepository) Ping(ctx context.Context) error {
+	return r.db.PingContext(ctx)
 }
 
 func (r *sqliteRepository) InitSchema(ctx context.Context) error {

@@ -11,6 +11,7 @@ import (
 	"ecommerce-analytics/internal/config"
 	"ecommerce-analytics/internal/connector"
 	"ecommerce-analytics/internal/handler"
+	"ecommerce-analytics/internal/model"
 	"ecommerce-analytics/internal/service"
 	"ecommerce-analytics/internal/store"
 )
@@ -207,5 +208,35 @@ func TestMetricsHandlerCSRF(t *testing.T) {
 	h.ServeHTTP(wWithHeader, reqWithHeader)
 	if wWithHeader.Code != http.StatusOK {
 		t.Errorf("expected 200 OK with X-Requested-With header, got %d", wWithHeader.Code)
+	}
+}
+
+func TestMetricsHandlerWithMocks(t *testing.T) {
+	mockAnalytics := &mockAnalyticsService{
+		overviewFn: func(ctx context.Context, start, end time.Time) (*model.OverviewMetrics, error) {
+			return &model.OverviewMetrics{
+				TotalSpend:  1234567,
+				TotalGMV:    9876543,
+				BlendedROAS: 8.0,
+			}, nil
+		},
+	}
+	mockSync := &mockSyncService{}
+	h := handler.NewMetricsHandler(mockAnalytics, mockSync, nil, nil)
+
+	req := httptest.NewRequest("GET", "/api/v1/metrics/overview", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK with mock service, got %d", w.Code)
+	}
+
+	var res model.OverviewMetrics
+	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
+		t.Fatalf("failed to unmarshal JSON: %v", err)
+	}
+	if res.BlendedROAS != 8.0 || res.TotalSpend != 1234567 {
+		t.Errorf("unexpected mock data: %+v", res)
 	}
 }
