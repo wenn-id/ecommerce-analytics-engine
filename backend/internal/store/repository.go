@@ -1,0 +1,312 @@
+package store
+
+import (
+	"context"
+	"database/sql"
+	"time"
+
+	"ecommerce-analytics/internal/model"
+)
+
+type Repository interface {
+	InitSchema(ctx context.Context) error
+	GetChannels(ctx context.Context) ([]model.Channel, error)
+	UpsertChannel(ctx context.Context, ch model.Channel) (int64, error)
+	UpsertCampaigns(ctx context.Context, campaigns []model.Campaign) error
+	UpsertAdMetrics(ctx context.Context, metrics []model.DailyAdMetric) error
+	UpsertSalesMetrics(ctx context.Context, metrics []model.DailySalesMetric) error
+	InsertSyncLog(ctx context.Context, log model.SyncLog) error
+	QueryAdMetrics(ctx context.Context, startDate, endDate time.Time) ([]model.DailyAdMetric, error)
+	QuerySalesMetrics(ctx context.Context, startDate, endDate time.Time) ([]model.DailySalesMetric, error)
+	GetCampaigns(ctx context.Context, channelID int64) ([]model.Campaign, error)
+}
+
+type sqliteRepository struct {
+	db *sql.DB
+}
+
+func NewRepository(db *sql.DB) Repository {
+	return &sqliteRepository{db: db}
+}
+
+func (r *sqliteRepository) InitSchema(ctx context.Context) error {
+	schema := `
+	CREATE TABLE IF NOT EXISTS channels (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		code TEXT UNIQUE NOT NULL,
+		name TEXT NOT NULL,
+		status TEXT NOT NULL,
+		last_synced_at DATETIME
+	);
+
+	CREATE TABLE IF NOT EXISTS campaigns (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		channel_id INTEGER NOT NULL,
+		external_id TEXT NOT NULL,
+		name TEXT NOT NULL,
+		status TEXT NOT NULL,
+		daily_budget REAL NOT NULL,
+		created_at DATETIME NOT NULL,
+		UNIQUE(channel_id, external_id)
+	);
+
+	CREATE TABLE IF NOT EXISTS daily_ad_metrics (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		campaign_id INTEGER NOT NULL,
+		date DATE NOT NULL,
+		impressions INTEGER NOT NULL,
+		clicks INTEGER NOT NULL,
+		spend REAL NOT NULL,
+		conversions INTEGER NOT NULL,
+		attributed_revenue REAL NOT NULL,
+		UNIQUE(campaign_id, date)
+	);
+
+	CREATE TABLE IF NOT EXISTS daily_sales_metrics (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		channel_id INTEGER NOT NULL,
+		date DATE NOT NULL,
+		total_orders INTEGER NOT NULL,
+		gmv REAL NOT NULL,
+		net_sales REAL NOT NULL,
+		cogs REAL NOT NULL,
+		returned_orders INTEGER NOT NULL,
+		UNIQUE(channel_id, date)
+	);
+
+	CREATE TABLE IF NOT EXISTS sync_logs (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		channel_id INTEGER NOT NULL,
+		synced_at DATETIME NOT NULL,
+		status TEXT NOT NULL,
+		records_processed INTEGER NOT NULL,
+		error_message TEXT
+	);
+	`
+	_, err := r.db.ExecContext(ctx, schema)
+	return err
+}
+
+func (r *sqliteRepository) UpsertChannel(ctx context.Context, ch model.Channel) (int64, error) {
+	query := `
+	INSERT INTO channels (code, name, status, last_synced_at)
+	VALUES (?, ?, ?, ?)
+	ON CONFLICT(code) DO UPDATE SET
+		name=excluded.name,
+		status=excluded.status,
+		last_synced_at=excluded.last_synced_at;
+	`
+	res, err := r.db.ExecContext(ctx, query, ch.Code, ch.Name, ch.Status, ch.LastSyncedAt)
+	if err != nil {
+		return 0, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil || id == 0 {
+		var existingID int64
+		err = r.db.QueryRowContext(ctx, "SELECT id FROM channels WHERE code = ?", ch.Code).Scan(&existingID)
+		return existingID, err
+	}
+	return id, nil
+}
+
+func (r *sqliteRepository) GetChannels(ctx context.Context) ([]model.Channel, error) {
+	rows, err := r.db.QueryContext(ctx, "SELECT id, code, name, status, last_synced_at FROM channels")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var channels []model.Channel
+	for rows.Next() {
+		var ch model.Channel
+		var lastSync sql.NullTime
+		if err := rows.Scan(&ch.ID, &ch.Code, &ch.Name, &ch.Status, &lastSync); err != nil {
+			return nil, err
+		}
+		if lastSync.Valid {
+			ch.LastSyncedAt = &lastSync.Time
+		}
+		channels = append(channels, ch)
+	}
+	return channels, nil
+}
+
+func (r *sqliteRepository) UpsertCampaigns(ctx context.Context, campaigns []model.Campaign) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO campaigns (channel_id, external_id, name, status, daily_budget, created_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(channel_id, external_id) DO UPDATE SET
+			name=excluded.name,
+			status=excluded.status,
+			daily_budget=excluded.daily_budget;
+	`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, c := range campaigns {
+		if _, err := stmt.ExecContext(ctx, c.ChannelID, c.ExternalID, c.Name, c.Status, c.DailyBudget, c.CreatedAt); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (r *sqliteRepository) UpsertAdMetrics(ctx context.Context, metrics []model.DailyAdMetric) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO daily_ad_metrics (campaign_id, date, impressions, clicks, spend, conversions, attributed_revenue)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(campaign_id, date) DO UPDATE SET
+			impressions=excluded.impressions,
+			clicks=excluded.clicks,
+			spend=excluded.spend,
+			conversions=excluded.conversions,
+			attributed_revenue=excluded.attributed_revenue;
+	`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, m := range metrics {
+		dateStr := m.Date.Format("2006-01-02")
+		if _, err := stmt.ExecContext(ctx, m.CampaignID, dateStr, m.Impressions, m.Clicks, m.Spend, m.Conversions, m.AttributedRevenue); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (r *sqliteRepository) UpsertSalesMetrics(ctx context.Context, metrics []model.DailySalesMetric) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO daily_sales_metrics (channel_id, date, total_orders, gmv, net_sales, cogs, returned_orders)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(channel_id, date) DO UPDATE SET
+			total_orders=excluded.total_orders,
+			gmv=excluded.gmv,
+			net_sales=excluded.net_sales,
+			cogs=excluded.cogs,
+			returned_orders=excluded.returned_orders;
+	`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, m := range metrics {
+		dateStr := m.Date.Format("2006-01-02")
+		if _, err := stmt.ExecContext(ctx, m.ChannelID, dateStr, m.TotalOrders, m.GMV, m.NetSales, m.COGS, m.ReturnedOrders); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (r *sqliteRepository) InsertSyncLog(ctx context.Context, log model.SyncLog) error {
+	query := `
+	INSERT INTO sync_logs (channel_id, synced_at, status, records_processed, error_message)
+	VALUES (?, ?, ?, ?, ?);
+	`
+	_, err := r.db.ExecContext(ctx, query, log.ChannelID, log.SyncedAt, log.Status, log.RecordsProcessed, log.ErrorMessage)
+	return err
+}
+
+func (r *sqliteRepository) QueryAdMetrics(ctx context.Context, startDate, endDate time.Time) ([]model.DailyAdMetric, error) {
+	query := `
+	SELECT id, campaign_id, date, impressions, clicks, spend, conversions, attributed_revenue
+	FROM daily_ad_metrics
+	WHERE date >= ? AND date <= ?
+	ORDER BY date ASC;
+	`
+	rows, err := r.db.QueryContext(ctx, query, startDate.Format("2006-01-02"), endDate.Format("2006-01-02"))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []model.DailyAdMetric
+	for rows.Next() {
+		var m model.DailyAdMetric
+		var dStr string
+		if err := rows.Scan(&m.ID, &m.CampaignID, &dStr, &m.Impressions, &m.Clicks, &m.Spend, &m.Conversions, &m.AttributedRevenue); err != nil {
+			return nil, err
+		}
+		t, _ := time.Parse("2006-01-02", dStr)
+		m.Date = t
+		results = append(results, m)
+	}
+	return results, nil
+}
+
+func (r *sqliteRepository) QuerySalesMetrics(ctx context.Context, startDate, endDate time.Time) ([]model.DailySalesMetric, error) {
+	query := `
+	SELECT id, channel_id, date, total_orders, gmv, net_sales, cogs, returned_orders
+	FROM daily_sales_metrics
+	WHERE date >= ? AND date <= ?
+	ORDER BY date ASC;
+	`
+	rows, err := r.db.QueryContext(ctx, query, startDate.Format("2006-01-02"), endDate.Format("2006-01-02"))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []model.DailySalesMetric
+	for rows.Next() {
+		var m model.DailySalesMetric
+		var dStr string
+		if err := rows.Scan(&m.ID, &m.ChannelID, &dStr, &m.TotalOrders, &m.GMV, &m.NetSales, &m.COGS, &m.ReturnedOrders); err != nil {
+			return nil, err
+		}
+		t, _ := time.Parse("2006-01-02", dStr)
+		m.Date = t
+		results = append(results, m)
+	}
+	return results, nil
+}
+
+func (r *sqliteRepository) GetCampaigns(ctx context.Context, channelID int64) ([]model.Campaign, error) {
+	var query string
+	var args []interface{}
+	if channelID > 0 {
+		query = "SELECT id, channel_id, external_id, name, status, daily_budget, created_at FROM campaigns WHERE channel_id = ?"
+		args = append(args, channelID)
+	} else {
+		query = "SELECT id, channel_id, external_id, name, status, daily_budget, created_at FROM campaigns"
+	}
+
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var campaigns []model.Campaign
+	for rows.Next() {
+		var c model.Campaign
+		if err := rows.Scan(&c.ID, &c.ChannelID, &c.ExternalID, &c.Name, &c.Status, &c.DailyBudget, &c.CreatedAt); err != nil {
+			return nil, err
+		}
+		campaigns = append(campaigns, c)
+	}
+	return campaigns, nil
+}
