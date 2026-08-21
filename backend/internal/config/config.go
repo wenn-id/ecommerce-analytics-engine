@@ -1,6 +1,9 @@
 package config
 
-import "os"
+import (
+	"os"
+	"strconv"
+)
 
 type Config struct {
 	Port                string
@@ -17,9 +20,15 @@ func Load() *Config {
 	if dbPath == "" {
 		dbPath = "analytics.db"
 	}
+	syncInterval := 60
+	if s := os.Getenv("SYNC_INTERVAL_MINUTES"); s != "" {
+		if val, err := strconv.Atoi(s); err == nil && val > 0 {
+			syncInterval = val
+		}
+	}
 	return &Config{
 		Port:                port,
 		DatabasePath:        dbPath,
-		SyncIntervalMinutes: 60,
+		SyncIntervalMinutes: syncInterval,
 	}
 }
