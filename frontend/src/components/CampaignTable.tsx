@@ -18,11 +18,21 @@ export const CampaignTable: React.FC<CampaignTableProps> = ({ refreshTrigger }) 
     total_pages: 0,
   });
   const [search, setSearch] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
   const [status, setStatus] = useState('');
   const [page, setPage] = useState(1);
   const [limit] = useState(10);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Debounce search input by 300ms
+  useEffect(() => {
+    const handler = setTimeout(() => {
+      setDebouncedSearch(search);
+      setPage(1);
+    }, 300);
+    return () => clearTimeout(handler);
+  }, [search]);
 
   const loadCampaigns = useCallback(async () => {
     setLoading(true);
@@ -31,7 +41,7 @@ export const CampaignTable: React.FC<CampaignTableProps> = ({ refreshTrigger }) 
       const res = await fetchCampaigns({
         page,
         limit,
-        search: search.trim() || undefined,
+        search: debouncedSearch.trim() || undefined,
         status: status || undefined,
       });
       setCampaigns(res.data || []);
@@ -47,7 +57,7 @@ export const CampaignTable: React.FC<CampaignTableProps> = ({ refreshTrigger }) 
     } finally {
       setLoading(false);
     }
-  }, [page, limit, search, status]);
+  }, [page, limit, debouncedSearch, status]);
 
   // Refetch when page, search, status, or external refresh trigger changes
   useEffect(() => {
@@ -56,7 +66,6 @@ export const CampaignTable: React.FC<CampaignTableProps> = ({ refreshTrigger }) 
 
   const handleSearchChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setSearch(e.target.value);
-    setPage(1); // Reset to page 1 on new search
   };
 
   const handleStatusChange = (e: React.ChangeEvent<HTMLSelectElement>) => {

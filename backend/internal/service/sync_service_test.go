@@ -37,3 +37,25 @@ func TestSyncServiceAll(t *testing.T) {
 		t.Errorf("expected 3 channels registered, got %d", len(channels))
 	}
 }
+
+func TestSyncServiceUnknownChannel(t *testing.T) {
+	ctx := context.Background()
+	db, _ := store.NewDB(":memory:")
+	defer db.Close()
+
+	repo := store.NewRepository(db)
+	_ = repo.InitSchema(ctx)
+
+	connectors := []connector.PlatformConnector{
+		connector.NewMetaConnector(),
+	}
+
+	syncSvc := service.NewSyncService(repo, connectors)
+	start := time.Now().AddDate(0, 0, -1)
+	end := time.Now()
+
+	err := syncSvc.SyncChannel(ctx, "non_existent_channel", start, end)
+	if err == nil {
+		t.Fatalf("expected error for unknown channel code, got nil")
+	}
+}

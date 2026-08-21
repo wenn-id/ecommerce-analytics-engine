@@ -243,6 +243,13 @@ func (h *MetricsHandler) handleSync(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+
+	// CSRF protection on state-mutating POST /sync: require custom header or API key
+	if r.Header.Get("X-Requested-With") == "" && r.Header.Get("X-API-Key") == "" && r.Header.Get("X-CSRF-Token") == "" {
+		jsonError(w, http.StatusForbidden, "CSRF protection: missing custom request header")
+		return
+	}
+
 	end := time.Now()
 	start := end.AddDate(0, 0, -30)
 	if err := h.syncSvc.SyncAll(r.Context(), start, end); err != nil {

@@ -2,7 +2,7 @@ package connector
 
 import (
 	"context"
-	"math/rand"
+	"math/rand/v2"
 	"time"
 
 	"ecommerce-analytics/internal/model"
@@ -27,15 +27,15 @@ func (s *shopeeConnector) FetchDailyAdMetrics(ctx context.Context, startDate, en
 	var metrics []model.DailyAdMetric
 	curr := startDate
 	for !curr.After(endDate) {
-		spend := 500000.0 + float64(rand.Intn(200000))
-		clicks := 300 + rand.Intn(100)
-		conversions := 20 + rand.Intn(10)
+		spend := 500000.0 + float64(rand.IntN(200000))
+		clicks := 300 + rand.IntN(100)
+		conversions := 20 + rand.IntN(10)
 		roas := 5.2 + (rand.Float64() * 2.0)
 
 		metrics = append(metrics, model.DailyAdMetric{
 			CampaignID:        3,
 			Date:              curr,
-			Impressions:       12000 + rand.Intn(3000),
+			Impressions:       12000 + rand.IntN(3000),
 			Clicks:            clicks,
 			Spend:             spend,
 			Conversions:       conversions,
@@ -50,8 +50,8 @@ func (s *shopeeConnector) FetchDailySales(ctx context.Context, startDate, endDat
 	var metrics []model.DailySalesMetric
 	curr := startDate
 	for !curr.After(endDate) {
-		orders := 35 + rand.Intn(15)
-		gmv := float64(orders) * (140000.0 + float64(rand.Intn(25000)))
+		orders := 35 + rand.IntN(15)
+		gmv := float64(orders) * (140000.0 + float64(rand.IntN(25000)))
 		cogs := gmv * 0.44
 		netSales := gmv * 0.93
 
@@ -61,7 +61,7 @@ func (s *shopeeConnector) FetchDailySales(ctx context.Context, startDate, endDat
 			GMV:            gmv,
 			NetSales:       netSales,
 			COGS:           cogs,
-			ReturnedOrders: rand.Intn(2),
+			ReturnedOrders: rand.IntN(2),
 		})
 		curr = curr.AddDate(0, 0, 1)
 	}
