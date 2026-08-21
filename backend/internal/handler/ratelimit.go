@@ -41,21 +41,23 @@ func (rl *RateLimiter) Allow(ip string) bool {
 
 	now := time.Now()
 
-	// If visitors map reaches capacity, perform proactive cleanup
-	if len(rl.visitors) >= maxRateLimiterEntries {
-		for k, v := range rl.visitors {
-			if now.Sub(v.lastRefill) > visitorExpiry {
-				delete(rl.visitors, k)
-			}
-		}
-		// If still full, reset to prevent unbounded memory growth
-		if len(rl.visitors) >= maxRateLimiterEntries {
-			rl.visitors = make(map[string]*clientVisitor)
-		}
-	}
-
 	v, exists := rl.visitors[ip]
 	if !exists {
+		// Evict oldest visitor entry if capacity reached
+		if len(rl.visitors) >= maxRateLimiterEntries {
+			var oldestKey string
+			var oldestTime time.Time
+			for k, vis := range rl.visitors {
+				if oldestTime.IsZero() || vis.lastRefill.Before(oldestTime) {
+					oldestTime = vis.lastRefill
+					oldestKey = k
+				}
+			}
+			if oldestKey != "" {
+				delete(rl.visitors, oldestKey)
+			}
+		}
+
 		rl.visitors[ip] = &clientVisitor{
 			tokens:     rl.capacity - 1,
 			lastRefill: now,
@@ -92,15 +94,15 @@ func (rl *RateLimiter) cleanupLoop(interval time.Duration) {
 	}
 }
 
-// getClientIP extracts client IP, only trusting forwarded headers if the immediate peer is a local proxy.
+// getClientIP extracts client IP, only trusting forwarded headers if the immediate peer is a loopback proxy.
 func getClientIP(r *http.Request) string {
 	peerHost, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		peerHost = r.RemoteAddr
 	}
 
-	// Only trust forwarded headers if request is from a local/trusted proxy (e.g. Next.js BFF proxy on loopback)
-	if isLoopbackOrLocal(peerHost) {
+	// Only trust forwarded headers if request is from a loopback proxy (e.g. Next.js BFF on localhost)
+	if isLoopback(peerHost) {
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 			parts := strings.Split(xff, ",")
 			if len(parts) > 0 {
@@ -121,10 +123,10 @@ func getClientIP(r *http.Request) string {
 	return peerHost
 }
 
-func isLoopbackOrLocal(host string) bool {
+func isLoopback(host string) bool {
 	ip := net.ParseIP(host)
 	if ip == nil {
-		return host == "localhost"
+		return host == "localhost" || host == "127.0.0.1" || host == "::1"
 	}
-	return ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified()
+	return ip.IsLoopback()
 }
