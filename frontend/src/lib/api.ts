@@ -5,7 +5,9 @@ import {
   PaginatedCampaignsResponse,
 } from '../types/analytics';
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api/v1';
+const API_BASE = typeof window !== 'undefined'
+  ? '/api'
+  : (process.env.BACKEND_API_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api/v1');
 
 function getHeaders(customHeaders?: HeadersInit): HeadersInit {
   return {
