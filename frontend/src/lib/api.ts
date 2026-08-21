@@ -1,4 +1,9 @@
-import { OverviewMetrics, TrendDataPoint, ChannelSummary, Campaign } from '../types/analytics';
+import {
+  OverviewMetrics,
+  TrendDataPoint,
+  ChannelSummary,
+  PaginatedCampaignsResponse,
+} from '../types/analytics';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api/v1';
 
@@ -20,8 +25,25 @@ export async function fetchChannels(startDate: string, endDate: string): Promise
   return res.json();
 }
 
-export async function fetchCampaigns(): Promise<Campaign[]> {
-  const res = await fetch(`${API_BASE}/campaigns`);
+export interface FetchCampaignsParams {
+  page?: number;
+  limit?: number;
+  search?: string;
+  status?: string;
+  channel_id?: number;
+}
+
+export async function fetchCampaigns(params?: FetchCampaignsParams): Promise<PaginatedCampaignsResponse> {
+  const searchParams = new URLSearchParams();
+  if (params?.page) searchParams.set('page', params.page.toString());
+  if (params?.limit) searchParams.set('limit', params.limit.toString());
+  if (params?.search) searchParams.set('search', params.search);
+  if (params?.status) searchParams.set('status', params.status);
+  if (params?.channel_id) searchParams.set('channel_id', params.channel_id.toString());
+
+  const query = searchParams.toString();
+  const url = `${API_BASE}/campaigns${query ? `?${query}` : ''}`;
+  const res = await fetch(url);
   if (!res.ok) throw new Error('Failed to fetch campaigns');
   return res.json();
 }
