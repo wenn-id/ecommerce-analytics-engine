@@ -105,3 +105,42 @@ func TestAnalyticsServiceChannelBreakdown(t *testing.T) {
 		}
 	}
 }
+
+func TestAnalyticsServiceTrendData(t *testing.T) {
+	ctx := context.Background()
+	db, _ := store.NewDB(":memory:")
+	defer db.Close()
+
+	repo := store.NewRepository(db)
+	_ = repo.InitSchema(ctx)
+
+	chID, _ := repo.UpsertChannel(ctx, model.Channel{Code: "meta_ads", Name: "Meta Ads", Status: "active"})
+	d1 := time.Date(2026, 8, 19, 0, 0, 0, 0, time.UTC)
+	d2 := time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)
+
+	_ = repo.UpsertAdMetrics(ctx, []model.DailyAdMetric{
+		{CampaignID: 1, Date: d1, Spend: 500000.0, Conversions: 10, AttributedRevenue: 2000000.0},
+		{CampaignID: 1, Date: d2, Spend: 1000000.0, Conversions: 20, AttributedRevenue: 5000000.0},
+	})
+	_ = repo.UpsertSalesMetrics(ctx, []model.DailySalesMetric{
+		{ChannelID: chID, Date: d1, TotalOrders: 15, GMV: 3000000.0, COGS: 1200000.0},
+		{ChannelID: chID, Date: d2, TotalOrders: 25, GMV: 6000000.0, COGS: 2400000.0},
+	})
+
+	analyticsSvc := service.NewAnalyticsService(repo)
+	trends, err := analyticsSvc.GetTrendData(ctx, d1, d2)
+	if err != nil {
+		t.Fatalf("unexpected error fetching trend data: %v", err)
+	}
+
+	if len(trends) != 2 {
+		t.Fatalf("expected 2 trend points, got %d", len(trends))
+	}
+
+	if trends[0].Spend != 500000.0 || trends[0].GMV != 3000000.0 || trends[0].BlendedROAS != 6.0 {
+		t.Errorf("incorrect trend 0: %+v", trends[0])
+	}
+	if trends[1].Spend != 1000000.0 || trends[1].GMV != 6000000.0 || trends[1].BlendedROAS != 6.0 {
+		t.Errorf("incorrect trend 1: %+v", trends[1])
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -19,8 +20,10 @@ type Repository interface {
 	UpsertSalesMetrics(ctx context.Context, metrics []model.DailySalesMetric) error
 	InsertSyncLog(ctx context.Context, log model.SyncLog) error
 	QueryAdMetrics(ctx context.Context, startDate, endDate time.Time) ([]model.DailyAdMetric, error)
-	QuerySalesMetrics(ctx context.Context, startDate, endDate time.Time) ([]model.DailySalesMetric, error)
 	GetCampaigns(ctx context.Context, filter model.CampaignFilter) ([]model.Campaign, int, error)
+	GetAggregatedOverview(ctx context.Context, startDate, endDate time.Time) (totalSpend float64, totalGMV float64, totalCOGS float64, totalOrders int, err error)
+	GetAggregatedDailyTrends(ctx context.Context, startDate, endDate time.Time) ([]model.TrendDataPoint, error)
+	GetAggregatedChannelSummaries(ctx context.Context, startDate, endDate time.Time) ([]model.ChannelSummary, error)
 }
 
 type sqliteRepository struct {
@@ -378,4 +381,170 @@ func (r *sqliteRepository) GetCampaigns(ctx context.Context, filter model.Campai
 	}
 
 	return campaigns, totalRecords, nil
+}
+
+func (r *sqliteRepository) GetAggregatedOverview(ctx context.Context, startDate, endDate time.Time) (float64, float64, float64, int, error) {
+	startStr := startDate.Format("2006-01-02")
+	endStr := endDate.Format("2006-01-02")
+
+	var totalSpend float64
+	spendQuery := "SELECT COALESCE(SUM(spend), 0) FROM daily_ad_metrics WHERE date >= ? AND date <= ?"
+	if err := r.db.QueryRowContext(ctx, spendQuery, startStr, endStr).Scan(&totalSpend); err != nil {
+		return 0, 0, 0, 0, err
+	}
+
+	var totalGMV, totalCOGS float64
+	var totalOrders int
+	salesQuery := "SELECT COALESCE(SUM(gmv), 0), COALESCE(SUM(cogs), 0), COALESCE(SUM(total_orders), 0) FROM daily_sales_metrics WHERE date >= ? AND date <= ?"
+	if err := r.db.QueryRowContext(ctx, salesQuery, startStr, endStr).Scan(&totalGMV, &totalCOGS, &totalOrders); err != nil {
+		return 0, 0, 0, 0, err
+	}
+
+	return totalSpend, totalGMV, totalCOGS, totalOrders, nil
+}
+
+func (r *sqliteRepository) GetAggregatedDailyTrends(ctx context.Context, startDate, endDate time.Time) ([]model.TrendDataPoint, error) {
+	startStr := startDate.Format("2006-01-02")
+	endStr := endDate.Format("2006-01-02")
+
+	query := `
+	SELECT 
+		d.date,
+		COALESCE(ad.total_spend, 0) as spend,
+		COALESCE(s.total_gmv, 0) as gmv,
+		COALESCE(s.total_orders, 0) as total_orders
+	FROM (
+		SELECT date FROM daily_ad_metrics WHERE date >= ? AND date <= ?
+		UNION
+		SELECT date FROM daily_sales_metrics WHERE date >= ? AND date <= ?
+	) d
+	LEFT JOIN (
+		SELECT date, SUM(spend) as total_spend 
+		FROM daily_ad_metrics 
+		WHERE date >= ? AND date <= ? 
+		GROUP BY date
+	) ad ON d.date = ad.date
+	LEFT JOIN (
+		SELECT date, SUM(gmv) as total_gmv, SUM(total_orders) as total_orders 
+		FROM daily_sales_metrics 
+		WHERE date >= ? AND date <= ? 
+		GROUP BY date
+	) s ON d.date = s.date
+	ORDER BY d.date ASC;
+	`
+	rows, err := r.db.QueryContext(ctx, query, startStr, endStr, startStr, endStr, startStr, endStr, startStr, endStr)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	dataMap := make(map[string]model.TrendDataPoint)
+	for rows.Next() {
+		var dStr string
+		var pt model.TrendDataPoint
+		if err := rows.Scan(&dStr, &pt.Spend, &pt.GMV, &pt.TotalOrders); err != nil {
+			return nil, err
+		}
+		t, err := parseDate(dStr)
+		if err == nil {
+			dStr = t.Format("2006-01-02")
+		}
+		pt.Date = dStr
+		dataMap[dStr] = pt
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	var results []model.TrendDataPoint
+	curr := startDate
+	for !curr.After(endDate) {
+		dStr := curr.Format("2006-01-02")
+		pt, ok := dataMap[dStr]
+		if !ok {
+			pt = model.TrendDataPoint{Date: dStr}
+		}
+		if pt.Spend > 0 {
+			pt.BlendedROAS = math.Round((pt.GMV/pt.Spend)*100) / 100
+		}
+		pt.Spend = math.Round(pt.Spend*100) / 100
+		pt.GMV = math.Round(pt.GMV*100) / 100
+		results = append(results, pt)
+		curr = curr.AddDate(0, 0, 1)
+	}
+
+	return results, nil
+}
+
+func (r *sqliteRepository) GetAggregatedChannelSummaries(ctx context.Context, startDate, endDate time.Time) ([]model.ChannelSummary, error) {
+	startStr := startDate.Format("2006-01-02")
+	endStr := endDate.Format("2006-01-02")
+
+	query := `
+	SELECT 
+		c.code,
+		c.name,
+		COALESCE(ad.total_spend, 0) as total_spend,
+		COALESCE(s.total_gmv, 0) as total_gmv
+	FROM channels c
+	LEFT JOIN (
+		SELECT cmp.channel_id, SUM(m.spend) as total_spend
+		FROM daily_ad_metrics m
+		JOIN campaigns cmp ON m.campaign_id = cmp.id
+		WHERE m.date >= ? AND m.date <= ?
+		GROUP BY cmp.channel_id
+	) ad ON c.id = ad.channel_id
+	LEFT JOIN (
+		SELECT channel_id, SUM(gmv) as total_gmv
+		FROM daily_sales_metrics
+		WHERE date >= ? AND date <= ?
+		GROUP BY channel_id
+	) s ON c.id = s.channel_id
+	ORDER BY c.id ASC;
+	`
+	rows, err := r.db.QueryContext(ctx, query, startStr, endStr, startStr, endStr)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	type channelData struct {
+		code  string
+		name  string
+		spend float64
+		gmv   float64
+	}
+
+	var channelsData []channelData
+	var totalSpend, totalGMV float64
+	for rows.Next() {
+		var cd channelData
+		if err := rows.Scan(&cd.code, &cd.name, &cd.spend, &cd.gmv); err != nil {
+			return nil, err
+		}
+		totalSpend += cd.spend
+		totalGMV += cd.gmv
+		channelsData = append(channelsData, cd)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	var summaries []model.ChannelSummary
+	for _, cd := range channelsData {
+		var roas float64
+		if cd.spend > 0 {
+			roas = cd.gmv / cd.spend
+		}
+		summaries = append(summaries, model.ChannelSummary{
+			ChannelCode:       cd.code,
+			ChannelName:       cd.name,
+			TotalSpend:        math.Round(cd.spend*100) / 100,
+			TotalGMV:          math.Round(cd.gmv*100) / 100,
+			ChannelROAS:       math.Round(roas*100) / 100,
+			SpendSharePercent: math.Round((cd.spend/math.Max(totalSpend, 1.0))*10000) / 100,
+			GMVSharePercent:   math.Round((cd.gmv/math.Max(totalGMV, 1.0))*10000) / 100,
+		})
+	}
+	return summaries, nil
 }
