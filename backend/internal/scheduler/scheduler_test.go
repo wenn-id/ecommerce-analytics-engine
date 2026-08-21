@@ -2,6 +2,7 @@ package scheduler_test
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -9,16 +10,16 @@ import (
 )
 
 type mockSyncService struct {
-	syncCalls int
+	syncCalls int64
 }
 
 func (m *mockSyncService) SyncAll(ctx context.Context, start, end time.Time) error {
-	m.syncCalls++
+	atomic.AddInt64(&m.syncCalls, 1)
 	return nil
 }
 
 func (m *mockSyncService) SyncChannel(ctx context.Context, code string, start, end time.Time) error {
-	m.syncCalls++
+	atomic.AddInt64(&m.syncCalls, 1)
 	return nil
 }
 

@@ -20,6 +20,7 @@ type MetricsHandler struct {
 	syncSvc      service.SyncService
 	repo         store.Repository
 	cfg          *config.Config
+	limiter      *RateLimiter
 }
 
 func NewMetricsHandler(analyticsSvc service.AnalyticsService, syncSvc service.SyncService, repo store.Repository, cfg *config.Config) *MetricsHandler {
@@ -32,6 +33,7 @@ func NewMetricsHandler(analyticsSvc service.AnalyticsService, syncSvc service.Sy
 		syncSvc:      syncSvc,
 		repo:         repo,
 		cfg:          cfg,
+		limiter:      NewRateLimiter(50, 100),
 	}
 	h.registerRoutes()
 	return h
@@ -60,6 +62,14 @@ func (h *MetricsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	// Rate limiting check
+	clientIP := getClientIP(r)
+	if h.limiter != nil && !h.limiter.Allow(clientIP) {
+		w.Header().Set("Retry-After", "1")
+		jsonError(w, http.StatusTooManyRequests, "rate limit exceeded, please retry later")
 		return
 	}
 

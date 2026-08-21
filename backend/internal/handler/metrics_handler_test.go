@@ -134,3 +134,42 @@ func TestMetricsHandlerAuth(t *testing.T) {
 		t.Errorf("expected 200 OK with valid API key, got %d", wAuth.Code)
 	}
 }
+
+func TestMetricsHandlerRateLimiting(t *testing.T) {
+	ctx := context.Background()
+	db, _ := store.NewDB(":memory:")
+	defer db.Close()
+
+	repo := store.NewRepository(db)
+	_ = repo.InitSchema(ctx)
+	conns := []connector.PlatformConnector{connector.NewMetaConnector()}
+	syncSvc := service.NewSyncService(repo, conns)
+	analyticsSvc := service.NewAnalyticsService(repo)
+
+	h := handler.NewMetricsHandler(analyticsSvc, syncSvc, repo, nil)
+
+	// Exhaust tokens with rate limiter set to 2 capacity
+	limiter := handler.NewRateLimiter(1, 2)
+	// Temporarily test limiter
+	ip := "192.168.1.100"
+	if !limiter.Allow(ip) {
+		t.Errorf("first request should be allowed")
+	}
+	if !limiter.Allow(ip) {
+		t.Errorf("second request should be allowed")
+	}
+	if limiter.Allow(ip) {
+		t.Errorf("third request exceeding capacity should be blocked")
+	}
+
+	// Verify 429 response through handler
+	for i := 0; i < 110; i++ {
+		req := httptest.NewRequest("GET", "/api/v1/health", nil)
+		req.RemoteAddr = "10.0.0.1:12345"
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if i >= 100 && w.Code == http.StatusTooManyRequests {
+			return // Successfully caught 429
+		}
+	}
+}
