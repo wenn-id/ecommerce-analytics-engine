@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"ecommerce-analytics/internal/config"
 	"ecommerce-analytics/internal/connector"
 	"ecommerce-analytics/internal/handler"
 	"ecommerce-analytics/internal/service"
@@ -26,15 +27,20 @@ func TestMetricsHandlerOverview(t *testing.T) {
 	_ = syncSvc.SyncAll(ctx, time.Now().AddDate(0, 0, -5), time.Now())
 
 	analyticsSvc := service.NewAnalyticsService(repo)
-	h := handler.NewMetricsHandler(analyticsSvc, syncSvc, repo)
+	h := handler.NewMetricsHandler(analyticsSvc, syncSvc, repo, nil)
 
 	req := httptest.NewRequest("GET", "/api/v1/metrics/overview?start_date=2026-08-01&end_date=2026-08-21", nil)
+	req.Header.Set("Origin", "http://localhost:3000")
 	w := httptest.NewRecorder()
 
 	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+
+	if w.Header().Get("Access-Control-Allow-Origin") != "http://localhost:3000" {
+		t.Errorf("expected CORS origin http://localhost:3000, got %s", w.Header().Get("Access-Control-Allow-Origin"))
 	}
 }
 
@@ -50,7 +56,7 @@ func TestMetricsHandlerCampaignsPagination(t *testing.T) {
 	_ = syncSvc.SyncAll(ctx, time.Now().AddDate(0, 0, -5), time.Now())
 
 	analyticsSvc := service.NewAnalyticsService(repo)
-	h := handler.NewMetricsHandler(analyticsSvc, syncSvc, repo)
+	h := handler.NewMetricsHandler(analyticsSvc, syncSvc, repo, nil)
 
 	req := httptest.NewRequest("GET", "/api/v1/campaigns?page=1&limit=2", nil)
 	w := httptest.NewRecorder()
@@ -83,5 +89,48 @@ func TestMetricsHandlerCampaignsPagination(t *testing.T) {
 	}
 	if resp.Pagination.TotalRecords == 0 {
 		t.Errorf("expected total_records > 0, got %d", resp.Pagination.TotalRecords)
+	}
+}
+
+func TestMetricsHandlerAuth(t *testing.T) {
+	ctx := context.Background()
+	db, _ := store.NewDB(":memory:")
+	defer db.Close()
+
+	repo := store.NewRepository(db)
+	_ = repo.InitSchema(ctx)
+	conns := []connector.PlatformConnector{connector.NewMetaConnector()}
+	syncSvc := service.NewSyncService(repo, conns)
+	analyticsSvc := service.NewAnalyticsService(repo)
+
+	cfg := &config.Config{
+		AllowedOrigins: []string{"http://localhost:3000"},
+		APIKey:         "secret-key-123",
+	}
+	h := handler.NewMetricsHandler(analyticsSvc, syncSvc, repo, cfg)
+
+	// Health endpoint should be public
+	reqHealth := httptest.NewRequest("GET", "/api/v1/health", nil)
+	wHealth := httptest.NewRecorder()
+	h.ServeHTTP(wHealth, reqHealth)
+	if wHealth.Code != http.StatusOK {
+		t.Errorf("expected health endpoint to be 200, got %d", wHealth.Code)
+	}
+
+	// Request without API key should be 401
+	reqUnauth := httptest.NewRequest("GET", "/api/v1/metrics/overview", nil)
+	wUnauth := httptest.NewRecorder()
+	h.ServeHTTP(wUnauth, reqUnauth)
+	if wUnauth.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 Unauthorized, got %d", wUnauth.Code)
+	}
+
+	// Request with valid X-API-Key should succeed
+	reqAuth := httptest.NewRequest("GET", "/api/v1/metrics/overview", nil)
+	reqAuth.Header.Set("X-API-Key", "secret-key-123")
+	wAuth := httptest.NewRecorder()
+	h.ServeHTTP(wAuth, reqAuth)
+	if wAuth.Code != http.StatusOK {
+		t.Errorf("expected 200 OK with valid API key, got %d", wAuth.Code)
 	}
 }

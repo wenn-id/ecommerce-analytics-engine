@@ -135,6 +135,16 @@ func (s *analyticsService) GetChannelBreakdown(ctx context.Context, start, end t
 		return nil, err
 	}
 
+	campaigns, _, err := s.repo.GetCampaigns(ctx, model.CampaignFilter{Limit: 10000})
+	if err != nil {
+		return nil, err
+	}
+
+	campaignToChannel := make(map[int64]int64, len(campaigns))
+	for _, c := range campaigns {
+		campaignToChannel[c.ID] = c.ChannelID
+	}
+
 	var totalSpend, totalGMV float64
 	for _, a := range adMetrics {
 		totalSpend += a.Spend
@@ -143,19 +153,22 @@ func (s *analyticsService) GetChannelBreakdown(ctx context.Context, start, end t
 		totalGMV += sm.GMV
 	}
 
+	channelSpendMap := make(map[int64]float64)
+	for _, a := range adMetrics {
+		if chID, ok := campaignToChannel[a.CampaignID]; ok {
+			channelSpendMap[chID] += a.Spend
+		}
+	}
+
+	channelGMVMap := make(map[int64]float64)
+	for _, sm := range salesMetrics {
+		channelGMVMap[sm.ChannelID] += sm.GMV
+	}
+
 	var summaries []model.ChannelSummary
 	for _, ch := range channels {
-		var chSpend, chGMV float64
-		for _, sm := range salesMetrics {
-			if sm.ChannelID == ch.ID {
-				chGMV += sm.GMV
-			}
-		}
-		for _, a := range adMetrics {
-			if a.CampaignID == ch.ID {
-				chSpend += a.Spend
-			}
-		}
+		chSpend := channelSpendMap[ch.ID]
+		chGMV := channelGMVMap[ch.ID]
 
 		var roas float64
 		if chSpend > 0 {

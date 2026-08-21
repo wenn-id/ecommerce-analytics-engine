@@ -53,16 +53,23 @@ func main() {
 
 	// Perform initial sync
 	log.Println("Performing initial multi-channel sync...")
-	_ = syncSvc.SyncAll(rootCtx, time.Now().AddDate(0, 0, -30), time.Now())
+	if err := syncSvc.SyncAll(rootCtx, time.Now().AddDate(0, 0, -30), time.Now()); err != nil {
+		log.Printf("Warning: initial sync failed: %v", err)
+	}
 
 	// Start background scheduler with cancellable context
 	scheduler.Start(rootCtx, syncSvc, cfg.SyncIntervalMinutes)
 
-	apiHandler := handler.NewMetricsHandler(analyticsSvc, syncSvc, repo)
+	apiHandler := handler.NewMetricsHandler(analyticsSvc, syncSvc, repo, cfg)
 
 	server := &http.Server{
-		Addr:    ":" + cfg.Port,
-		Handler: apiHandler,
+		Addr:              ":" + cfg.Port,
+		Handler:           apiHandler,
+		ReadTimeout:       15 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20, // 1 MB
 	}
 
 	// Channel to listen for errors from the server goroutine

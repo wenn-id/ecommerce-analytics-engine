@@ -2,10 +2,13 @@ package handler
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
+	"ecommerce-analytics/internal/config"
 	"ecommerce-analytics/internal/model"
 	"ecommerce-analytics/internal/service"
 	"ecommerce-analytics/internal/store"
@@ -16,27 +19,63 @@ type MetricsHandler struct {
 	analyticsSvc service.AnalyticsService
 	syncSvc      service.SyncService
 	repo         store.Repository
+	cfg          *config.Config
 }
 
-func NewMetricsHandler(analyticsSvc service.AnalyticsService, syncSvc service.SyncService, repo store.Repository) *MetricsHandler {
+func NewMetricsHandler(analyticsSvc service.AnalyticsService, syncSvc service.SyncService, repo store.Repository, cfg *config.Config) *MetricsHandler {
+	if cfg == nil {
+		cfg = config.Load()
+	}
 	h := &MetricsHandler{
 		mux:          http.NewServeMux(),
 		analyticsSvc: analyticsSvc,
 		syncSvc:      syncSvc,
 		repo:         repo,
+		cfg:          cfg,
 	}
 	h.registerRoutes()
 	return h
 }
 
 func (h *MetricsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	origin := r.Header.Get("Origin")
+	if origin != "" {
+		allowed := false
+		for _, o := range h.cfg.AllowedOrigins {
+			if o == "*" || o == origin {
+				allowed = true
+				break
+			}
+		}
+		if allowed {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+		}
+	} else if len(h.cfg.AllowedOrigins) > 0 && h.cfg.AllowedOrigins[0] == "*" {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+	}
 
-	if r.Method == "OPTIONS" {
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
+
+	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusOK)
 		return
+	}
+
+	// Optional API key authentication
+	if h.cfg.APIKey != "" && r.URL.Path != "/api/v1/health" {
+		reqKey := r.Header.Get("X-API-Key")
+		if reqKey == "" {
+			authHeader := r.Header.Get("Authorization")
+			if strings.HasPrefix(authHeader, "Bearer ") {
+				reqKey = strings.TrimPrefix(authHeader, "Bearer ")
+			}
+		}
+		if reqKey != h.cfg.APIKey {
+			jsonError(w, http.StatusUnauthorized, "unauthorized: invalid or missing API key")
+			return
+		}
 	}
 
 	h.mux.ServeHTTP(w, r)
@@ -82,7 +121,8 @@ func (h *MetricsHandler) handleOverview(w http.ResponseWriter, r *http.Request) 
 	start, end := h.parseDateRange(r)
 	data, err := h.analyticsSvc.GetOverviewMetrics(r.Context(), start, end)
 	if err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		log.Printf("Error fetching overview metrics: %v", err)
+		jsonError(w, http.StatusInternalServerError, "failed to fetch overview metrics")
 		return
 	}
 	jsonResponse(w, http.StatusOK, data)
@@ -96,7 +136,8 @@ func (h *MetricsHandler) handleTrend(w http.ResponseWriter, r *http.Request) {
 	start, end := h.parseDateRange(r)
 	data, err := h.analyticsSvc.GetTrendData(r.Context(), start, end)
 	if err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		log.Printf("Error fetching trend data: %v", err)
+		jsonError(w, http.StatusInternalServerError, "failed to fetch trend data")
 		return
 	}
 	jsonResponse(w, http.StatusOK, data)
@@ -110,7 +151,8 @@ func (h *MetricsHandler) handleChannels(w http.ResponseWriter, r *http.Request) 
 	start, end := h.parseDateRange(r)
 	data, err := h.analyticsSvc.GetChannelBreakdown(r.Context(), start, end)
 	if err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		log.Printf("Error fetching channel breakdown: %v", err)
+		jsonError(w, http.StatusInternalServerError, "failed to fetch channel breakdown")
 		return
 	}
 	jsonResponse(w, http.StatusOK, data)
@@ -131,6 +173,9 @@ func (h *MetricsHandler) handleCampaigns(w http.ResponseWriter, r *http.Request)
 
 	status := query.Get("status")
 	search := query.Get("search")
+	if len(search) > 200 {
+		search = search[:200]
+	}
 
 	page := 1
 	if pStr := query.Get("page"); pStr != "" {
@@ -142,7 +187,11 @@ func (h *MetricsHandler) handleCampaigns(w http.ResponseWriter, r *http.Request)
 	limit := 10
 	if lStr := query.Get("limit"); lStr != "" {
 		if l, err := strconv.Atoi(lStr); err == nil && l > 0 {
-			limit = l
+			if l > 100 {
+				limit = 100
+			} else {
+				limit = l
+			}
 		}
 	}
 
@@ -156,7 +205,8 @@ func (h *MetricsHandler) handleCampaigns(w http.ResponseWriter, r *http.Request)
 
 	campaigns, totalRecords, err := h.repo.GetCampaigns(r.Context(), filter)
 	if err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		log.Printf("Error fetching campaigns: %v", err)
+		jsonError(w, http.StatusInternalServerError, "failed to fetch campaigns")
 		return
 	}
 
@@ -186,7 +236,8 @@ func (h *MetricsHandler) handleSync(w http.ResponseWriter, r *http.Request) {
 	end := time.Now()
 	start := end.AddDate(0, 0, -30)
 	if err := h.syncSvc.SyncAll(r.Context(), start, end); err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		log.Printf("Error triggering sync: %v", err)
+		jsonError(w, http.StatusInternalServerError, "failed to trigger multi-channel sync")
 		return
 	}
 	jsonResponse(w, http.StatusOK, map[string]string{"status": "sync_completed"})
