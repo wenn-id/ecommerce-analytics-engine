@@ -8,6 +8,11 @@ import (
 	"time"
 )
 
+const (
+	maxRateLimiterEntries = 5000
+	visitorExpiry         = 3 * time.Minute
+)
+
 type clientVisitor struct {
 	tokens     float64
 	lastRefill time.Time
@@ -26,6 +31,7 @@ func NewRateLimiter(rate float64, capacity float64) *RateLimiter {
 		rate:     rate,
 		capacity: capacity,
 	}
+	go rl.cleanupLoop(1 * time.Minute)
 	return rl
 }
 
@@ -34,6 +40,20 @@ func (rl *RateLimiter) Allow(ip string) bool {
 	defer rl.mu.Unlock()
 
 	now := time.Now()
+
+	// If visitors map reaches capacity, perform proactive cleanup
+	if len(rl.visitors) >= maxRateLimiterEntries {
+		for k, v := range rl.visitors {
+			if now.Sub(v.lastRefill) > visitorExpiry {
+				delete(rl.visitors, k)
+			}
+		}
+		// If still full, reset to prevent unbounded memory growth
+		if len(rl.visitors) >= maxRateLimiterEntries {
+			rl.visitors = make(map[string]*clientVisitor)
+		}
+	}
+
 	v, exists := rl.visitors[ip]
 	if !exists {
 		rl.visitors[ip] = &clientVisitor{
@@ -58,22 +78,53 @@ func (rl *RateLimiter) Allow(ip string) bool {
 	return false
 }
 
+func (rl *RateLimiter) cleanupLoop(interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	for range ticker.C {
+		rl.mu.Lock()
+		now := time.Now()
+		for ip, v := range rl.visitors {
+			if now.Sub(v.lastRefill) > visitorExpiry {
+				delete(rl.visitors, ip)
+			}
+		}
+		rl.mu.Unlock()
+	}
+}
+
+// getClientIP extracts client IP, only trusting forwarded headers if the immediate peer is a local proxy.
 func getClientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		parts := strings.Split(xff, ",")
-		if len(parts) > 0 {
-			ip := strings.TrimSpace(parts[0])
-			if ip != "" {
-				return ip
+	peerHost, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		peerHost = r.RemoteAddr
+	}
+
+	// Only trust forwarded headers if request is from a local/trusted proxy (e.g. Next.js BFF proxy on loopback)
+	if isLoopbackOrLocal(peerHost) {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			parts := strings.Split(xff, ",")
+			if len(parts) > 0 {
+				clientIP := strings.TrimSpace(parts[0])
+				if clientIP != "" && net.ParseIP(clientIP) != nil {
+					return clientIP
+				}
+			}
+		}
+		if xri := r.Header.Get("X-Real-IP"); xri != "" {
+			clientIP := strings.TrimSpace(xri)
+			if clientIP != "" && net.ParseIP(clientIP) != nil {
+				return clientIP
 			}
 		}
 	}
-	if xri := r.Header.Get("X-Real-IP"); xri != "" {
-		return strings.TrimSpace(xri)
+
+	return peerHost
+}
+
+func isLoopbackOrLocal(host string) bool {
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return host == "localhost"
 	}
-	ip, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return ip
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified()
 }
