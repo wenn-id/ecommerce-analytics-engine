@@ -83,13 +83,19 @@ func (h *MetricsHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	dbStatus := "ok"
+	statusCode := http.StatusOK
+	overallStatus := "ok"
+
 	if h.repo != nil {
 		if err := h.repo.Ping(r.Context()); err != nil {
-			dbStatus = "error: " + err.Error()
+			log.Printf("Health check: database ping failed: %v", err)
+			dbStatus = "unavailable"
+			overallStatus = "unhealthy"
+			statusCode = http.StatusServiceUnavailable
 		}
 	}
-	jsonResponse(w, http.StatusOK, map[string]string{
-		"status":    "ok",
+	jsonResponse(w, statusCode, map[string]string{
+		"status":    overallStatus,
 		"database":  dbStatus,
 		"timestamp": time.Now().Format(time.RFC3339),
 	})
