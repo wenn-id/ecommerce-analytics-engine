@@ -35,3 +35,15 @@ export interface Campaign {
   daily_budget: number;
   created_at: string;
 }
+
+export interface PaginationMeta {
+  current_page: number;
+  limit: number;
+  total_records: number;
+  total_pages: number;
+}
+
+export interface PaginatedCampaignsResponse {
+  data: Campaign[];
+  pagination: PaginationMeta;
+}

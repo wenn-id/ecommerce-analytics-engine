@@ -1,8 +1,8 @@
 'use client';
 import React, { useState, useEffect } from 'react';
 import { DollarSign, ShoppingCart, TrendingUp, Percent, RefreshCw, Layers } from 'lucide-react';
-import { fetchOverview, fetchTrend, fetchChannels, fetchCampaigns, triggerSync } from '../lib/api';
-import { OverviewMetrics, TrendDataPoint, ChannelSummary, Campaign } from '../types/analytics';
+import { fetchOverview, fetchTrend, fetchChannels, triggerSync } from '../lib/api';
+import { OverviewMetrics, TrendDataPoint, ChannelSummary } from '../types/analytics';
 import { MetricCard } from '../components/MetricCard';
 import { TrendChart } from '../components/TrendChart';
 import { ChannelBreakdown } from '../components/ChannelBreakdown';
@@ -12,23 +12,21 @@ export default function DashboardPage() {
   const [overview, setOverview] = useState<OverviewMetrics | null>(null);
   const [trend, setTrend] = useState<TrendDataPoint[]>([]);
   const [channels, setChannels] = useState<ChannelSummary[]>([]);
-  const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [syncing, setSyncing] = useState(false);
+  const [refreshTrigger, setRefreshTrigger] = useState(0);
 
   const loadData = async () => {
     const start = '2026-08-01';
     const end = '2026-08-21';
     try {
-      const [ov, tr, ch, camp] = await Promise.all([
+      const [ov, tr, ch] = await Promise.all([
         fetchOverview(start, end),
         fetchTrend(start, end),
         fetchChannels(start, end),
-        fetchCampaigns(),
       ]);
       setOverview(ov);
       setTrend(tr);
       setChannels(ch);
-      setCampaigns(camp);
     } catch (err) {
       console.error(err);
     }
@@ -43,6 +41,7 @@ export default function DashboardPage() {
     try {
       await triggerSync();
       await loadData();
+      setRefreshTrigger((prev) => prev + 1);
     } finally {
       setSyncing(false);
     }
@@ -83,7 +82,7 @@ export default function DashboardPage() {
             <ChannelBreakdown channels={channels} />
           </div>
           <div className="lg:col-span-2">
-            <CampaignTable campaigns={campaigns} />
+            <CampaignTable refreshTrigger={refreshTrigger} />
           </div>
         </div>
       </div>
