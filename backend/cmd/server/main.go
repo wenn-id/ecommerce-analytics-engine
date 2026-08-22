@@ -3,7 +3,8 @@ package main
 import (
 	"context"
 	"errors"
-	"log"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -21,16 +22,24 @@ import (
 func main() {
 	cfg := config.Load()
 
+	setupLogger(cfg)
+
+	if err := cfg.Validate(); err != nil {
+		slog.Error("invalid configuration", "error", err)
+		os.Exit(1)
+	}
+
 	db, err := store.NewDB(cfg.DatabasePath)
 	if err != nil {
-		log.Fatalf("failed to connect to database: %v", err)
+		slog.Error("failed to connect to database", "error", err)
+		os.Exit(1)
 	}
 	defer func() {
-		log.Println("Closing database connection...")
+		slog.Info("closing database connection")
 		if err := db.Close(); err != nil {
-			log.Printf("Error closing database: %v", err)
+			slog.Error("error closing database", "error", err)
 		} else {
-			log.Println("Database connection closed cleanly.")
+			slog.Info("database connection closed cleanly")
 		}
 	}()
 
@@ -39,22 +48,23 @@ func main() {
 
 	repo := store.NewRepository(db)
 	if err := repo.InitSchema(rootCtx); err != nil {
-		log.Fatalf("failed to init schema: %v", err)
+		slog.Error("failed to apply database migrations", "error", err)
+		os.Exit(1)
 	}
 
-	connectors := []connector.PlatformConnector{
-		connector.NewMetaConnector(),
-		connector.NewTikTokConnector(),
-		connector.NewShopeeConnector(),
-	}
+	connectors := connector.BuildConnectors(nil)
 
 	syncSvc := service.NewSyncService(repo, connectors)
 	analyticsSvc := service.NewAnalyticsService(repo)
 
 	// Perform initial sync
-	log.Println("Performing initial multi-channel sync...")
+	slog.Info("performing initial multi-channel sync")
 	if err := syncSvc.SyncAll(rootCtx, time.Now().AddDate(0, 0, -30), time.Now()); err != nil {
-		log.Printf("Warning: initial sync failed: %v", err)
+		if errors.Is(err, service.ErrSyncInProgress) {
+			slog.Warn("initial sync skipped: another sync is already running")
+		} else {
+			slog.Warn("initial sync failed", "error", err)
+		}
 	}
 
 	// Start background scheduler with cancellable context
@@ -75,7 +85,7 @@ func main() {
 	// Channel to listen for errors from the server goroutine
 	serverErr := make(chan error, 1)
 	go func() {
-		log.Printf("Analytics Engine Server listening on port %s", cfg.Port)
+		slog.Info("analytics engine server listening", "port", cfg.Port, "env", cfg.Env)
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			serverErr <- err
 		}
@@ -87,24 +97,38 @@ func main() {
 
 	select {
 	case err := <-serverErr:
-		log.Fatalf("Server error: %v", err)
+		slog.Error("server error", "error", err)
+		os.Exit(1)
 	case sig := <-sigChan:
-		log.Printf("Received shutdown signal (%v). Initiating graceful shutdown...", sig)
+		slog.Info("received shutdown signal, initiating graceful shutdown", "signal", sig.String())
 	}
 
 	// Cancel background scheduler context
 	rootCancel()
-	log.Println("Background scheduler stopped.")
+	slog.Info("background scheduler stopped")
 
 	// Create context with timeout for draining active HTTP requests
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		log.Printf("HTTP server shutdown encountered an error: %v", err)
+		slog.Error("HTTP server shutdown encountered an error", "error", err)
 	} else {
-		log.Println("HTTP server stopped gracefully.")
+		slog.Info("HTTP server stopped gracefully")
 	}
 
-	log.Println("Shutdown complete.")
+	slog.Info("shutdown complete")
+}
+
+// setupLogger installs the process-wide slog logger: JSON for machine
+// ingestion in deployments, human-readable text otherwise (#39).
+func setupLogger(cfg *config.Config) {
+	var handler slog.Handler
+	handler = slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})
+	if cfg.LogFormat == "json" {
+		handler = slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})
+	}
+	slog.SetDefault(slog.New(handler))
+
+	fmt.Fprintf(os.Stderr, "logger initialized (format=%s)\n", cfg.LogFormat)
 }

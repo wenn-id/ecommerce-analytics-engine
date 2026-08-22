@@ -21,6 +21,8 @@ type Repository interface {
 	InsertSyncLog(ctx context.Context, log model.SyncLog) error
 	QueryAdMetrics(ctx context.Context, startDate, endDate time.Time) ([]model.DailyAdMetric, error)
 	GetCampaigns(ctx context.Context, filter model.CampaignFilter) ([]model.Campaign, int, error)
+	GetCampaignIDByExternalID(ctx context.Context, channelID int64) (map[string]int64, error)
+	Ping(ctx context.Context) error
 	GetAggregatedOverview(ctx context.Context, startDate, endDate time.Time) (totalSpend float64, totalGMV float64, totalCOGS float64, totalOrders int, err error)
 	GetAggregatedDailyTrends(ctx context.Context, startDate, endDate time.Time) ([]model.TrendDataPoint, error)
 	GetAggregatedChannelSummaries(ctx context.Context, startDate, endDate time.Time) ([]model.ChannelSummary, error)
@@ -34,72 +36,37 @@ func NewRepository(db *sql.DB) Repository {
 	return &sqliteRepository{db: db}
 }
 
+// InitSchema applies all pending versioned migrations (see migrate.go and
+// migrations/). It is idempotent.
 func (r *sqliteRepository) InitSchema(ctx context.Context) error {
-	schema := `
-	CREATE TABLE IF NOT EXISTS channels (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		code TEXT UNIQUE NOT NULL,
-		name TEXT NOT NULL,
-		status TEXT NOT NULL,
-		last_synced_at DATETIME
-	);
+	return Migrate(ctx, r.db, migrationsFS)
+}
 
-	CREATE TABLE IF NOT EXISTS campaigns (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		channel_id INTEGER NOT NULL,
-		external_id TEXT NOT NULL,
-		name TEXT NOT NULL,
-		status TEXT NOT NULL,
-		daily_budget REAL NOT NULL,
-		created_at DATETIME NOT NULL,
-		UNIQUE(channel_id, external_id)
-	);
+// Ping verifies database connectivity for health checks (#39).
+func (r *sqliteRepository) Ping(ctx context.Context) error {
+	return r.db.PingContext(ctx)
+}
 
-	CREATE TABLE IF NOT EXISTS daily_ad_metrics (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		campaign_id INTEGER NOT NULL,
-		date DATE NOT NULL,
-		impressions INTEGER NOT NULL,
-		clicks INTEGER NOT NULL,
-		spend REAL NOT NULL,
-		conversions INTEGER NOT NULL,
-		attributed_revenue REAL NOT NULL,
-		UNIQUE(campaign_id, date)
-	);
+// GetCampaignIDByExternalID returns the full external_id -> id mapping for a
+// channel with no row limit, so ad metric attribution never depends on
+// pagination ceilings or row ordering (#59).
+func (r *sqliteRepository) GetCampaignIDByExternalID(ctx context.Context, channelID int64) (map[string]int64, error) {
+	rows, err := r.db.QueryContext(ctx, "SELECT external_id, id FROM campaigns WHERE channel_id = ?", channelID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
 
-	CREATE TABLE IF NOT EXISTS daily_sales_metrics (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		channel_id INTEGER NOT NULL,
-		date DATE NOT NULL,
-		total_orders INTEGER NOT NULL,
-		gmv REAL NOT NULL,
-		net_sales REAL NOT NULL,
-		cogs REAL NOT NULL,
-		returned_orders INTEGER NOT NULL,
-		UNIQUE(channel_id, date)
-	);
-
-	CREATE TABLE IF NOT EXISTS sync_logs (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		channel_id INTEGER NOT NULL,
-		synced_at DATETIME NOT NULL,
-		status TEXT NOT NULL,
-		records_processed INTEGER NOT NULL,
-		error_message TEXT
-	);
-
-	CREATE INDEX IF NOT EXISTS idx_campaigns_channel_id ON campaigns(channel_id);
-	CREATE INDEX IF NOT EXISTS idx_campaigns_status ON campaigns(status);
-	CREATE INDEX IF NOT EXISTS idx_campaigns_name ON campaigns(name);
-	CREATE INDEX IF NOT EXISTS idx_daily_ad_metrics_date ON daily_ad_metrics(date);
-	CREATE INDEX IF NOT EXISTS idx_daily_ad_metrics_campaign_date ON daily_ad_metrics(campaign_id, date);
-	CREATE INDEX IF NOT EXISTS idx_daily_sales_metrics_date ON daily_sales_metrics(date);
-	CREATE INDEX IF NOT EXISTS idx_daily_sales_metrics_channel_date ON daily_sales_metrics(channel_id, date);
-	CREATE INDEX IF NOT EXISTS idx_sync_logs_channel_id ON sync_logs(channel_id);
-	CREATE INDEX IF NOT EXISTS idx_sync_logs_channel_synced ON sync_logs(channel_id, synced_at);
-	`
-	_, err := r.db.ExecContext(ctx, schema)
-	return err
+	m := make(map[string]int64)
+	for rows.Next() {
+		var extID string
+		var id int64
+		if err := rows.Scan(&extID, &id); err != nil {
+			return nil, err
+		}
+		m[extID] = id
+	}
+	return m, rows.Err()
 }
 
 func (r *sqliteRepository) UpsertChannel(ctx context.Context, ch model.Channel) (int64, error) {
@@ -321,6 +288,13 @@ func parseDate(dStr string) (time.Time, error) {
 	return time.Parse("2006-01-02", dStr)
 }
 
+// escapeLikePattern escapes LIKE wildcards and the escape character itself so
+// user-supplied search terms are matched literally (#65).
+func escapeLikePattern(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return r.Replace(s)
+}
+
 func (r *sqliteRepository) GetCampaigns(ctx context.Context, filter model.CampaignFilter) ([]model.Campaign, int, error) {
 	whereClauses := []string{"1=1"}
 	var args []interface{}
@@ -336,8 +310,10 @@ func (r *sqliteRepository) GetCampaigns(ctx context.Context, filter model.Campai
 	}
 
 	if filter.Search != "" {
-		whereClauses = append(whereClauses, "(name LIKE ? OR external_id LIKE ?)")
-		searchTerm := "%" + filter.Search + "%"
+		// Escape LIKE wildcards so a literal % or _ in user input matches
+		// itself instead of any character sequence (#65).
+		whereClauses = append(whereClauses, `(name LIKE ? ESCAPE '\' OR external_id LIKE ? ESCAPE '\')`)
+		searchTerm := "%" + escapeLikePattern(filter.Search) + "%"
 		args = append(args, searchTerm, searchTerm)
 	}
 

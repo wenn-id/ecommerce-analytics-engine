@@ -1,13 +1,15 @@
 package handler
 
 import (
-	"log"
+	"log/slog"
 	"net/http"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"time"
 
 	"ecommerce-analytics/internal/config"
+	"ecommerce-analytics/internal/metrics"
 )
 
 type Middleware func(http.Handler) http.Handler
@@ -23,7 +25,11 @@ func RecoveryMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if err := recover(); err != nil {
-				log.Printf("PANIC recovered in HTTP handler: %v\nStack: %s", err, string(debug.Stack()))
+				slog.Error("panic recovered in HTTP handler",
+					"error", err,
+					"method", r.Method,
+					"path", r.URL.Path,
+					"stack", string(debug.Stack()))
 				jsonError(w, http.StatusInternalServerError, "internal server error")
 			}
 		}()
@@ -31,14 +37,33 @@ func RecoveryMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func LoggingMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
-		rw := &responseWriterInterceptor{ResponseWriter: w, statusCode: http.StatusOK}
-		next.ServeHTTP(rw, r)
-		duration := time.Since(start)
-		log.Printf("[%s] %s %s %d (%v)", r.Method, r.URL.Path, getClientIP(r), rw.statusCode, duration)
-	})
+func MetricsMiddleware(reg *metrics.Registry) Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			reg.RequestStarted()
+			start := time.Now()
+			rw := &responseWriterInterceptor{ResponseWriter: w, statusCode: http.StatusOK}
+			next.ServeHTTP(rw, r)
+			reg.RequestFinished()
+			reg.RecordRequest(r.URL.Path, r.Method, rw.statusCode, time.Since(start).Seconds())
+		})
+	}
+}
+
+func LoggingMiddleware(ipResolver *ClientIPResolver) Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			start := time.Now()
+			rw := &responseWriterInterceptor{ResponseWriter: w, statusCode: http.StatusOK}
+			next.ServeHTTP(rw, r)
+			slog.Info("http request",
+				"method", r.Method,
+				"path", r.URL.Path,
+				"client_ip", ipResolver.Resolve(r),
+				"status", rw.statusCode,
+				"duration_ms", time.Since(start).Milliseconds())
+		})
+	}
 }
 
 type responseWriterInterceptor struct {
@@ -83,13 +108,13 @@ func CORSMiddleware(cfg *config.Config) Middleware {
 	}
 }
 
-func RateLimitMiddleware(limiter *RateLimiter) Middleware {
+func RateLimitMiddleware(limiter *RateLimiter, ipResolver *ClientIPResolver) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if limiter != nil {
-				clientIP := getClientIP(r)
+				clientIP := ipResolver.Resolve(r)
 				if !limiter.Allow(clientIP) {
-					w.Header().Set("Retry-After", "1")
+					w.Header().Set("Retry-After", strconv.Itoa(limiter.RetryAfter()))
 					jsonError(w, http.StatusTooManyRequests, "rate limit exceeded, please retry later")
 					return
 				}
@@ -99,10 +124,15 @@ func RateLimitMiddleware(limiter *RateLimiter) Middleware {
 	}
 }
 
+// AuthMiddleware enforces the static API key on every route except the
+// health endpoint and the Prometheus /metrics endpoint. The metrics endpoint
+// is intentionally unauthenticated because the backend is expected to run on
+// a private network (no host port mapping; see docker-compose.yml) and the
+// exposition contains no business data.
 func AuthMiddleware(cfg *config.Config) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if cfg != nil && cfg.APIKey != "" && r.URL.Path != "/api/v1/health" {
+			if cfg != nil && cfg.APIKey != "" && !isPublicPath(r.URL.Path) {
 				reqKey := r.Header.Get("X-API-Key")
 				if reqKey == "" {
 					authHeader := r.Header.Get("Authorization")
@@ -118,4 +148,8 @@ func AuthMiddleware(cfg *config.Config) Middleware {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+func isPublicPath(path string) bool {
+	return path == "/api/v1/health" || path == "/metrics"
 }

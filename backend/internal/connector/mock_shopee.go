@@ -17,34 +17,41 @@ func NewShopeeConnector() PlatformConnector {
 func (s *shopeeConnector) GetChannelCode() string { return "shopee" }
 func (s *shopeeConnector) GetChannelName() string { return "Shopee" }
 
-func (s *shopeeConnector) FetchCampaigns(ctx context.Context) ([]model.Campaign, error) {
+func (s *shopeeConnector) campaigns() []model.Campaign {
 	return []model.Campaign{
 		{ExternalID: "sh_c_301", Name: "Shopee Discovery Ads - Flash Deals", Status: "ACTIVE", DailyBudget: 600000.0, CreatedAt: time.Now()},
-	}, nil
+	}
 }
 
-func (s *shopeeConnector) FetchDailyAdMetrics(ctx context.Context, startDate, endDate time.Time) ([]model.DailyAdMetric, error) {
-	var metrics []model.DailyAdMetric
-	curr := startDate
-	for !curr.After(endDate) {
-		daySeed := uint64(curr.Unix() / 86400)
-		rng := rand.New(rand.NewPCG(daySeed, 301))
+func (s *shopeeConnector) FetchCampaigns(ctx context.Context) ([]model.Campaign, error) {
+	return s.campaigns(), nil
+}
 
-		spend := 500000.0 + float64(rng.IntN(200000))
-		clicks := 300 + rng.IntN(100)
-		conversions := 20 + rng.IntN(10)
-		roas := 5.2 + (rng.Float64() * 2.0)
+func (s *shopeeConnector) FetchDailyAdMetrics(ctx context.Context, startDate, endDate time.Time) ([]AdMetric, error) {
+	campaigns := s.campaigns()
+	var metrics []AdMetric
+	for _, campaign := range campaigns {
+		curr := startDate
+		for !curr.After(endDate) {
+			daySeed := uint64(curr.Unix() / 86400)
+			rng := rand.New(rand.NewPCG(daySeed, 301))
 
-		metrics = append(metrics, model.DailyAdMetric{
-			CampaignID:        3,
-			Date:              curr,
-			Impressions:       12000 + rng.IntN(3000),
-			Clicks:            clicks,
-			Spend:             spend,
-			Conversions:       conversions,
-			AttributedRevenue: spend * roas,
-		})
-		curr = curr.AddDate(0, 0, 1)
+			spend := 500000.0 + float64(rng.IntN(200000))
+			clicks := int64(300 + rng.IntN(100))
+			conversions := int64(20 + rng.IntN(10))
+			roas := 5.2 + (rng.Float64() * 2.0)
+
+			metrics = append(metrics, AdMetric{
+				CampaignExternalID: campaign.ExternalID,
+				Date:               curr,
+				Impressions:        int64(12000 + rng.IntN(3000)),
+				Clicks:             clicks,
+				Spend:              spend,
+				Conversions:        conversions,
+				AttributedRevenue:  spend * roas,
+			})
+			curr = curr.AddDate(0, 0, 1)
+		}
 	}
 	return metrics, nil
 }

@@ -19,6 +19,20 @@ export async function DELETE(request: NextRequest, { params }: { params: { path:
   return proxyRequest(request, params.path);
 }
 
+// Resolve the client IP from standard proxy headers. `request.ip` is
+// deprecated since Next.js 14 and may be undefined, which used to collapse
+// every proxied request onto 127.0.0.1 (#63).
+function resolveClientIp(request: NextRequest): string {
+  const forwardedFor = request.headers.get('x-forwarded-for');
+  if (forwardedFor) {
+    const firstHop = forwardedFor.split(',')[0].trim();
+    if (firstHop) return firstHop;
+  }
+  const realIp = request.headers.get('x-real-ip');
+  if (realIp) return realIp.trim();
+  return '127.0.0.1';
+}
+
 async function proxyRequest(request: NextRequest, pathSegments: string[]) {
   const path = (pathSegments || []).join('/');
   const searchParams = request.nextUrl.search;
@@ -26,10 +40,11 @@ async function proxyRequest(request: NextRequest, pathSegments: string[]) {
 
   const headers = new Headers();
   headers.set('Content-Type', 'application/json');
+  // Only the server-side key is ever forwarded. When it is unset the request
+  // is sent without a key: the backend is then intentionally keyless (dev
+  // default), and a browser-supplied key is never trusted (#63).
   if (SERVER_API_KEY) {
     headers.set('X-API-Key', SERVER_API_KEY);
-  } else if (request.headers.get('x-api-key')) {
-    headers.set('X-API-Key', request.headers.get('x-api-key')!);
   }
 
   const requestedWith = request.headers.get('x-requested-with') || 'XMLHttpRequest';
@@ -40,8 +55,7 @@ async function proxyRequest(request: NextRequest, pathSegments: string[]) {
     headers.set('X-CSRF-Token', csrfToken);
   }
 
-  const clientIp = request.ip || '127.0.0.1';
-  headers.set('X-Forwarded-For', clientIp);
+  headers.set('X-Forwarded-For', resolveClientIp(request));
 
   const reqInit: RequestInit = {
     method: request.method,
