@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -55,15 +56,27 @@ func NewMetaAPIConnector(accessToken, adAccountID, apiBase, apiVersion string) (
 func (m *metaAPIConnector) GetChannelCode() string { return "meta_ads" }
 func (m *metaAPIConnector) GetChannelName() string { return "Meta Ads" }
 
-func (m *metaAPIConnector) authQuery(extra url.Values) url.Values {
-	q := url.Values{}
-	for k, vs := range extra {
-		for _, v := range vs {
-			q.Add(k, v)
-		}
+// authHeader sends the access token as a bearer credential. The Graph API
+// accepts it in the Authorization header, which keeps the secret out of the
+// request URL and therefore out of error messages and logs
+// (query-parameter auth leaks via URL-based diagnostics).
+func (m *metaAPIConnector) authHeader() http.Header {
+	h := http.Header{}
+	h.Set("Authorization", "Bearer "+m.accessToken)
+	return h
+}
+
+// nextPage rewrites a Graph API paging.next URL into the path/query for the
+// next request against the configured API host, dropping any credential that
+// Meta embedded in the link.
+func (m *metaAPIConnector) nextPage(raw string) (string, url.Values, bool) {
+	next, err := url.Parse(raw)
+	if err != nil || next.Path == "" {
+		return "", nil, false
 	}
-	q.Set("access_token", m.accessToken)
-	return q
+	q := next.Query()
+	q.Del("access_token")
+	return next.Path, q, true
 }
 
 type metaPaging struct {
@@ -85,15 +98,15 @@ type metaCampaign struct {
 
 func (m *metaAPIConnector) FetchCampaigns(ctx context.Context) ([]model.Campaign, error) {
 	var collected []model.Campaign
-	query := m.authQuery(url.Values{
+	query := url.Values{
 		"fields": {"id,name,effective_status,daily_budget"},
 		"limit":  {"100"},
-	})
+	}
 	path := fmt.Sprintf("/%s/act_%s/campaigns", m.apiVersion, m.accountID)
 
 	for {
 		var resp metaCampaignsResponse
-		if err := m.client.getJSON(ctx, path, query, nil, &resp); err != nil {
+		if err := m.client.getJSON(ctx, path, query, m.authHeader(), &resp); err != nil {
 			return nil, err
 		}
 		for _, c := range resp.Data {
@@ -112,13 +125,11 @@ func (m *metaAPIConnector) FetchCampaigns(ctx context.Context) ([]model.Campaign
 		if resp.Paging.Next == "" {
 			break
 		}
-		next, err := url.Parse(resp.Paging.Next)
-		if err != nil || next.Path == "" {
+		nextPath, nextQuery, ok := m.nextPage(resp.Paging.Next)
+		if !ok {
 			break
 		}
-		// Follow the absolute Graph API "next" link relative to the client base.
-		path = next.Path
-		query = next.Query()
+		path, query = nextPath, nextQuery
 	}
 	if collected == nil {
 		collected = []model.Campaign{}
@@ -166,18 +177,18 @@ func (m *metaAPIConnector) FetchDailyAdMetrics(ctx context.Context, startDate, e
 
 		timeRange := fmt.Sprintf(`{"since":"%s","until":"%s"}`,
 			windowStart.Format("2006-01-02"), windowEnd.Format("2006-01-02"))
-		query := m.authQuery(url.Values{
+		query := url.Values{
 			"level":          {"campaign"},
 			"fields":         {"campaign_id,impressions,clicks,spend,actions,action_values"},
 			"time_increment": {"1"},
 			"time_range":     {timeRange},
 			"limit":          {"500"},
-		})
+		}
 		path := fmt.Sprintf("/%s/act_%s/insights", m.apiVersion, m.accountID)
 
 		for {
 			var resp metaInsightsResponse
-			if err := m.client.getJSON(ctx, path, query, nil, &resp); err != nil {
+			if err := m.client.getJSON(ctx, path, query, m.authHeader(), &resp); err != nil {
 				return nil, err
 			}
 			for _, row := range resp.Data {
@@ -190,12 +201,11 @@ func (m *metaAPIConnector) FetchDailyAdMetrics(ctx context.Context, startDate, e
 			if resp.Paging.Next == "" {
 				break
 			}
-			next, err := url.Parse(resp.Paging.Next)
-			if err != nil || next.Path == "" {
+			nextPath, nextQuery, ok := m.nextPage(resp.Paging.Next)
+			if !ok {
 				break
 			}
-			path = next.Path
-			query = next.Query()
+			path, query = nextPath, nextQuery
 		}
 
 		windowStart = windowEnd.AddDate(0, 0, 1)

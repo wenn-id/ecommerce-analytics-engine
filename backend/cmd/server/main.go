@@ -52,7 +52,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	connectors := connector.BuildConnectors(nil)
+	connectors := connector.BuildConnectors(nil, cfg.IsProduction())
 
 	syncSvc := service.NewSyncService(repo, connectors)
 	analyticsSvc := service.NewAnalyticsService(repo)

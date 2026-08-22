@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"strconv"
 	"strings"
@@ -29,6 +30,10 @@ import (
 //   - SHOPEE_CAMPAIGN_IDS – comma-separated Shopee Ads campaign ids to sync.
 //     The Ads API resolves campaign metadata by id (there is no
 //     list-everything endpoint), so operators pin the campaigns they own.
+//   - SHOPEE_TIMEZONE  – IANA name of the shop's reporting timezone
+//     (default UTC). Used consistently for the query window and for bucketing
+//     order timestamps into days, so near-midnight orders land on the same
+//     day the seller sees in Shopee.
 //
 // Ads metrics come from get_product_campaign_daily_performance. Sales are
 // aggregated from get_order_list + get_order_detail. Shopee reports order
@@ -41,14 +46,24 @@ type shopeeAPIConnector struct {
 	accessToken string
 	shopID      string
 	campaignIDs []string
+	loc         *time.Location
 }
 
-func NewShopeeAPIConnector(partnerID, partnerKey, accessToken, shopID, apiBase, campaignIDs string) (PlatformConnector, error) {
+func NewShopeeAPIConnector(partnerID, partnerKey, accessToken, shopID, apiBase, campaignIDs, timezone string) (PlatformConnector, error) {
 	if partnerID == "" || partnerKey == "" || accessToken == "" || shopID == "" {
 		return nil, fmt.Errorf("SHOPEE_PARTNER_ID, SHOPEE_PARTNER_KEY, SHOPEE_ACCESS_TOKEN and SHOPEE_SHOP_ID are required for the real Shopee connector")
 	}
 	if apiBase == "" {
 		apiBase = "https://openplatform.shopee.com"
+	}
+	loc, err := time.LoadLocation(strings.TrimSpace(timezone))
+	if err != nil || loc == nil {
+		if strings.TrimSpace(timezone) != "" {
+			// An explicitly configured but unparseable timezone must not
+			// silently shift reporting days; fall back to UTC and say so.
+			slog.Warn("invalid SHOPEE_TIMEZONE, falling back to UTC", "value", timezone, "error", err)
+		}
+		loc = time.UTC
 	}
 	var campaigns []string
 	for _, id := range strings.Split(campaignIDs, ",") {
@@ -63,7 +78,14 @@ func NewShopeeAPIConnector(partnerID, partnerKey, accessToken, shopID, apiBase, 
 		accessToken: accessToken,
 		shopID:      shopID,
 		campaignIDs: campaigns,
+		loc:         loc,
 	}, nil
+}
+
+// reportingDay reinterprets a calendar date in the shop's reporting timezone
+// (the incoming timestamps carry wall-clock dates from the sync window).
+func (s *shopeeAPIConnector) reportingDay(t time.Time) time.Time {
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, s.loc)
 }
 
 func (s *shopeeAPIConnector) GetChannelCode() string { return "shopee" }
@@ -171,8 +193,8 @@ func (s *shopeeAPIConnector) FetchDailyAdMetrics(ctx context.Context, startDate,
 	path := "/api/v2/ads/get_product_campaign_daily_performance"
 	query := s.signedQuery(path, url.Values{
 		"campaign_id_list": {strings.Join(s.campaignIDs, ",")},
-		"start_date":       {startDate.Format("2006-01-02")},
-		"end_date":         {endDate.Format("2006-01-02")},
+		"start_date":       {s.reportingDay(startDate).Format("2006-01-02")},
+		"end_date":         {s.reportingDay(endDate).Format("2006-01-02")},
 	})
 	var resp shopeeCampaignPerfResponse
 	if err := s.client.getJSON(ctx, path, query, nil, &resp); err != nil {
@@ -258,8 +280,10 @@ func (s *shopeeAPIConnector) FetchDailySales(ctx context.Context, startDate, end
 	var orderSNs []string
 	cancelled := make(map[string]bool)
 	path := "/api/v2/order/get_order_list"
-	timeFrom := startDate.Unix()
-	timeTo := endDate.Add(24 * time.Hour).Add(-time.Second).Unix()
+	// Query and bucketing share the same reporting timezone so near-midnight
+	// orders land on the day the seller sees.
+	timeFrom := s.reportingDay(startDate).Unix()
+	timeTo := s.reportingDay(endDate).Add(24 * time.Hour).Add(-time.Second).Unix()
 	cursor := ""
 	for {
 		extra := url.Values{
@@ -315,7 +339,7 @@ func (s *shopeeAPIConnector) FetchDailySales(ctx context.Context, startDate, end
 			if err != nil {
 				continue
 			}
-			day := time.Unix(createdSecs, 0).Format("2006-01-02")
+			day := time.Unix(createdSecs, 0).In(s.loc).Format("2006-01-02")
 			b := bucketFor(day)
 			if cancelled[o.OrderSN] {
 				b.returned++
@@ -328,7 +352,7 @@ func (s *shopeeAPIConnector) FetchDailySales(ctx context.Context, startDate, end
 
 	// 3. Materialize one row per day in the window (0-filled days included).
 	var metrics []model.DailySalesMetric
-	for curr := startDate; !curr.After(endDate); curr = curr.AddDate(0, 0, 1) {
+	for curr := s.reportingDay(startDate); !curr.After(s.reportingDay(endDate)); curr = curr.AddDate(0, 0, 1) {
 		day := curr.Format("2006-01-02")
 		b := byDay[day]
 		if b == nil {

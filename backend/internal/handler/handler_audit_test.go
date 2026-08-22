@@ -2,6 +2,7 @@ package handler_test
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -180,6 +181,33 @@ func TestRateLimiterRetryAfter(t *testing.T) {
 	}
 	if got := handler.NewRateLimiter(0.25, 10).RetryAfter(); got != 4 {
 		t.Errorf("rate 0.25/s: expected Retry-After 4s, got %d", got)
+	}
+}
+
+func TestRateLimitPeerCapBlocksSpoofedForwardedFor(t *testing.T) {
+	// A caller behind a trusted proxy can rotate arbitrary X-Forwarded-For
+	// values to mint fresh per-client buckets; the aggregate per-peer bucket
+	// must still throttle them.
+	cfg := &config.Config{
+		AllowedOrigins: []string{"http://localhost:3000"},
+		TrustedProxies: []string{"10.0.0.0/8"},
+	}
+	h, _ := newTestHandler(t, cfg)
+
+	got429 := false
+	for i := 0; i < 200; i++ {
+		req := httptest.NewRequest("GET", "/api/v1/health", nil)
+		req.RemoteAddr = "10.0.0.9:4444"
+		req.Header.Set("X-Forwarded-For", fmt.Sprintf("203.0.113.%d", i%250+1))
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code == http.StatusTooManyRequests {
+			got429 = true
+			break
+		}
+	}
+	if !got429 {
+		t.Fatal("expected the aggregate peer bucket to throttle rotating spoofed X-Forwarded-For values")
 	}
 }
 

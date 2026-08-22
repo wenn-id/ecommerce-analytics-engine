@@ -65,3 +65,26 @@ func TestConfigValidateProductionRequiresAPIKey(t *testing.T) {
 		t.Fatalf("expected keyless development config to be valid, got %v", err)
 	}
 }
+
+func TestConfigEnvNormalization(t *testing.T) {
+	// Whitespace and aliases must not silently downgrade the strict profile.
+	for _, raw := range []string{" production ", "PRODUCTION", "Prod"} {
+		t.Setenv("APP_ENV", raw)
+		if cfg := config.Load(); !cfg.IsProduction() {
+			t.Errorf("APP_ENV=%q should select the production profile, got %q", raw, cfg.Env)
+		}
+	}
+	t.Setenv("APP_ENV", " dev ")
+	if cfg := config.Load(); cfg.Env != "development" {
+		t.Errorf("APP_ENV=' dev ' should normalize to development, got %q", cfg.Env)
+	}
+}
+
+func TestConfigValidateRejectsUnknownEnv(t *testing.T) {
+	// A typo like "poduction" must fail loudly, not run with lax development
+	// behavior.
+	cfg := &config.Config{Env: "poduction"}
+	if err := cfg.Validate(); !errors.Is(err, config.ErrInvalidEnv) {
+		t.Fatalf("expected ErrInvalidEnv, got %v", err)
+	}
+}

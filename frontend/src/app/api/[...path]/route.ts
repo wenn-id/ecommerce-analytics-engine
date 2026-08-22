@@ -19,20 +19,6 @@ export async function DELETE(request: NextRequest, { params }: { params: { path:
   return proxyRequest(request, params.path);
 }
 
-// Resolve the client IP from standard proxy headers. `request.ip` is
-// deprecated since Next.js 14 and may be undefined, which used to collapse
-// every proxied request onto 127.0.0.1 (#63).
-function resolveClientIp(request: NextRequest): string {
-  const forwardedFor = request.headers.get('x-forwarded-for');
-  if (forwardedFor) {
-    const firstHop = forwardedFor.split(',')[0].trim();
-    if (firstHop) return firstHop;
-  }
-  const realIp = request.headers.get('x-real-ip');
-  if (realIp) return realIp.trim();
-  return '127.0.0.1';
-}
-
 async function proxyRequest(request: NextRequest, pathSegments: string[]) {
   const path = (pathSegments || []).join('/');
   const searchParams = request.nextUrl.search;
@@ -55,7 +41,18 @@ async function proxyRequest(request: NextRequest, pathSegments: string[]) {
     headers.set('X-CSRF-Token', csrfToken);
   }
 
-  headers.set('X-Forwarded-For', resolveClientIp(request));
+  // Forward the incoming X-Forwarded-For chain untouched. The App Router
+  // cannot read the TCP peer address, so any value we would write here is
+  // client-controlled anyway; rewriting it (e.g. picking the first hop)
+  // would only lend our proxy's credibility to a spoofed entry. The backend
+  // walks the chain itself and, crucially, rate limits the aggregate
+  // forwarding peer so spoofed chains cannot bypass per-client limits.
+  // When the header is absent (direct browser call), forward nothing and
+  // let the backend attribute the request to the BFF peer (#63).
+  const forwardedFor = request.headers.get('x-forwarded-for');
+  if (forwardedFor) {
+    headers.set('X-Forwarded-For', forwardedFor);
+  }
 
   const reqInit: RequestInit = {
     method: request.method,

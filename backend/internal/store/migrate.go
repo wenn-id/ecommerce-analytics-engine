@@ -24,15 +24,13 @@ var migrationNameRe = regexp.MustCompile(`^(\d+)_.*\.up\.sql$`)
 // Migrate applies every pending up-migration from fsys in version order.
 // Applied versions are recorded in the schema_migrations table, making the
 // process idempotent and safe to re-run on every startup.
+//
+// The whole run (version read + applies) executes inside a single write
+// transaction. Combined with the _txlock=immediate DSN (see db.go), two
+// server processes cannot both observe the same baseline and race to apply
+// the same migration: the second blocks at BEGIN until the first commits,
+// then sees the applied versions and exits cleanly.
 func Migrate(ctx context.Context, db *sql.DB, fsys embed.FS) error {
-	if _, err := db.ExecContext(ctx, `
-		CREATE TABLE IF NOT EXISTS schema_migrations (
-			version INTEGER PRIMARY KEY,
-			applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-		);`); err != nil {
-		return fmt.Errorf("create schema_migrations: %w", err)
-	}
-
 	entries, err := fsys.ReadDir("migrations")
 	if err != nil {
 		return fmt.Errorf("read migrations dir: %w", err)
@@ -60,8 +58,22 @@ func Migrate(ctx context.Context, db *sql.DB, fsys embed.FS) error {
 	}
 	sort.Ints(versions)
 
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin migration tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS schema_migrations (
+			version INTEGER PRIMARY KEY,
+			applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);`); err != nil {
+		return fmt.Errorf("create schema_migrations: %w", err)
+	}
+
 	var applied int
-	if err := db.QueryRowContext(ctx, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&applied); err != nil {
+	if err := tx.QueryRowContext(ctx, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&applied); err != nil {
 		return fmt.Errorf("read applied migrations: %w", err)
 	}
 
@@ -73,29 +85,17 @@ func Migrate(ctx context.Context, db *sql.DB, fsys embed.FS) error {
 		if err != nil {
 			return fmt.Errorf("read migration %s: %w", files[v], err)
 		}
-		if err := applyMigration(ctx, db, v, files[v], string(body)); err != nil {
-			return err
+		if _, err := tx.ExecContext(ctx, string(body)); err != nil {
+			return fmt.Errorf("apply migration %s: %w", files[v], err)
 		}
+		if _, err := tx.ExecContext(ctx, "INSERT INTO schema_migrations (version) VALUES (?)", v); err != nil {
+			return fmt.Errorf("record migration %s: %w", files[v], err)
+		}
+		slog.Info("database migration applied", "version", v, "file", files[v])
 	}
-	return nil
-}
 
-func applyMigration(ctx context.Context, db *sql.DB, version int, name, body string) error {
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin tx for migration %s: %w", name, err)
-	}
-	defer tx.Rollback()
-
-	if _, err := tx.ExecContext(ctx, body); err != nil {
-		return fmt.Errorf("apply migration %s: %w", name, err)
-	}
-	if _, err := tx.ExecContext(ctx, "INSERT INTO schema_migrations (version) VALUES (?)", version); err != nil {
-		return fmt.Errorf("record migration %s: %w", name, err)
-	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit migration %s: %w", name, err)
+		return fmt.Errorf("commit migrations: %w", err)
 	}
-	slog.Info("database migration applied", "version", version, "file", name)
 	return nil
 }

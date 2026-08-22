@@ -3,6 +3,7 @@ package service_test
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,16 +13,21 @@ import (
 	"ecommerce-analytics/internal/store"
 )
 
-// blockingConnector stalls FetchCampaigns until released, letting tests hold
-// a sync in flight.
+// blockingConnector stalls FetchCampaigns until released. It signals `entered`
+// once FetchCampaigns starts, which deterministically proves the sync lock is
+// held (syncSingle only runs inside SyncAll's in-flight section).
 type blockingConnector struct {
-	release chan struct{}
+	enteredOnce sync.Once
+	entered     chan struct{}
+	release     chan struct{}
 }
 
 func (b *blockingConnector) GetChannelCode() string { return "meta_ads" }
 func (b *blockingConnector) GetChannelName() string { return "Meta Ads" }
 
 func (b *blockingConnector) FetchCampaigns(ctx context.Context) ([]model.Campaign, error) {
+	// Idempotent: the connector is reused by the post-release sync run.
+	b.enteredOnce.Do(func() { close(b.entered) })
 	<-b.release
 	return nil, nil
 }
@@ -44,7 +50,10 @@ func TestSyncAllRejectsConcurrentRun(t *testing.T) {
 		t.Fatalf("init schema: %v", err)
 	}
 
-	blocker := &blockingConnector{release: make(chan struct{})}
+	blocker := &blockingConnector{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
 	syncSvc := service.NewSyncService(repo, []connector.PlatformConnector{blocker})
 
 	done := make(chan error, 1)
@@ -52,9 +61,13 @@ func TestSyncAllRejectsConcurrentRun(t *testing.T) {
 		done <- syncSvc.SyncAll(ctx, time.Now().AddDate(0, 0, -1), time.Now())
 	}()
 
-	// Give the first sync a moment to enter flight, then assert the second is
-	// rejected instead of running concurrently (#58).
-	time.Sleep(50 * time.Millisecond)
+	// Wait until the first sync demonstrably holds the in-flight lock, then
+	// assert the second is rejected instead of running concurrently (#58).
+	select {
+	case <-blocker.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first sync never entered FetchCampaigns")
+	}
 	err := syncSvc.SyncAll(ctx, time.Now().AddDate(0, 0, -1), time.Now())
 	if !errors.Is(err, service.ErrSyncInProgress) {
 		t.Fatalf("expected ErrSyncInProgress, got %v", err)

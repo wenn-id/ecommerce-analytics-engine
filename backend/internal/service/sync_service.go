@@ -111,11 +111,15 @@ func (s *syncService) syncSingle(ctx context.Context, conn connector.PlatformCon
 	recordsCount := 0
 
 	// 1. Fetch & Upsert Campaigns
+	// campaignsRefreshed gates ad-metric ingestion: if the refresh failed,
+	// the external_id mapping may reference campaigns that were deleted or is
+	// missing newly created ones, so attributing fresh metrics against a
+	// stale mapping would quietly misreport (or drop) them.
+	campaignsRefreshed := false
 	campaigns, err := conn.FetchCampaigns(ctx)
 	if err != nil {
 		slog.Error("error fetching campaigns", "channel", channelCode, "error", err)
 		syncErrors = append(syncErrors, fmt.Sprintf("fetch campaigns: %v", err))
-		campaigns = nil
 	} else {
 		for i := range campaigns {
 			campaigns[i].ChannelID = chID
@@ -123,6 +127,8 @@ func (s *syncService) syncSingle(ctx context.Context, conn connector.PlatformCon
 		if err := s.repo.UpsertCampaigns(ctx, campaigns); err != nil {
 			slog.Error("error upserting campaigns", "channel", channelCode, "error", err)
 			syncErrors = append(syncErrors, fmt.Sprintf("upsert campaigns: %v", err))
+		} else {
+			campaignsRefreshed = true
 		}
 	}
 
@@ -136,40 +142,45 @@ func (s *syncService) syncSingle(ctx context.Context, conn connector.PlatformCon
 	}
 
 	// 2. Fetch & Upsert Ad Metrics
-	adMetrics, err := conn.FetchDailyAdMetrics(ctx, start, end)
-	if err != nil {
-		slog.Error("error fetching ad metrics", "channel", channelCode, "error", err)
-		syncErrors = append(syncErrors, fmt.Sprintf("fetch ad metrics: %v", err))
-	} else if len(campaignIDByExternalID) > 0 {
-		dbMetrics := make([]model.DailyAdMetric, 0, len(adMetrics))
-		unmapped := 0
-		for _, m := range adMetrics {
-			dbID, ok := campaignIDByExternalID[m.CampaignExternalID]
-			if !ok {
-				// The connector reported a campaign we did not fetch/upsert in
-				// this run; drop the metric rather than misattribute it (#59).
-				unmapped++
-				continue
-			}
-			dbMetrics = append(dbMetrics, model.DailyAdMetric{
-				CampaignID:        dbID,
-				Date:              m.Date,
-				Impressions:       int(m.Impressions),
-				Clicks:            int(m.Clicks),
-				Spend:             m.Spend,
-				Conversions:       int(m.Conversions),
-				AttributedRevenue: m.AttributedRevenue,
-			})
-		}
-		if unmapped > 0 {
-			slog.Warn("dropped ad metrics with unknown campaign external_id",
-				"channel", channelCode, "dropped", unmapped)
-		}
-		if err := s.repo.UpsertAdMetrics(ctx, dbMetrics); err != nil {
-			slog.Error("error upserting ad metrics", "channel", channelCode, "error", err)
-			syncErrors = append(syncErrors, fmt.Sprintf("upsert ad metrics: %v", err))
+	if !campaignsRefreshed {
+		slog.Warn("skipping ad metric ingestion for channel: campaign refresh did not succeed", "channel", channelCode)
+		syncErrors = append(syncErrors, "ad metrics skipped: campaign refresh failed")
+	} else {
+		adMetrics, err := conn.FetchDailyAdMetrics(ctx, start, end)
+		if err != nil {
+			slog.Error("error fetching ad metrics", "channel", channelCode, "error", err)
+			syncErrors = append(syncErrors, fmt.Sprintf("fetch ad metrics: %v", err))
 		} else {
-			recordsCount += len(dbMetrics)
+			dbMetrics := make([]model.DailyAdMetric, 0, len(adMetrics))
+			unmapped := 0
+			for _, m := range adMetrics {
+				dbID, ok := campaignIDByExternalID[m.CampaignExternalID]
+				if !ok {
+					// The connector reported a campaign we did not fetch/upsert in
+					// this run; drop the metric rather than misattribute it (#59).
+					unmapped++
+					continue
+				}
+				dbMetrics = append(dbMetrics, model.DailyAdMetric{
+					CampaignID:        dbID,
+					Date:              m.Date,
+					Impressions:       int(m.Impressions),
+					Clicks:            int(m.Clicks),
+					Spend:             m.Spend,
+					Conversions:       int(m.Conversions),
+					AttributedRevenue: m.AttributedRevenue,
+				})
+			}
+			if unmapped > 0 {
+				slog.Warn("dropped ad metrics with unknown campaign external_id",
+					"channel", channelCode, "dropped", unmapped)
+			}
+			if err := s.repo.UpsertAdMetrics(ctx, dbMetrics); err != nil {
+				slog.Error("error upserting ad metrics", "channel", channelCode, "error", err)
+				syncErrors = append(syncErrors, fmt.Sprintf("upsert ad metrics: %v", err))
+			} else {
+				recordsCount += len(dbMetrics)
+			}
 		}
 	}
 

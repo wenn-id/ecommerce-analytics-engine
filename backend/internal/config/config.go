@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"log/slog"
 	"net"
 	"os"
@@ -46,7 +47,16 @@ func Load() *Config {
 	if env == "" {
 		env = "development"
 	}
-	env = strings.ToLower(env)
+	// Trim and lowercase so " Production " still selects the strict profile;
+	// unknown profiles are rejected by Validate instead of silently behaving
+	// like development.
+	env = strings.ToLower(strings.TrimSpace(env))
+	switch env {
+	case "dev":
+		env = "development"
+	case "prod":
+		env = "production"
+	}
 
 	logFormat := strings.ToLower(os.Getenv("LOG_FORMAT"))
 	if logFormat != "json" {
@@ -82,6 +92,11 @@ func Load() *Config {
 // an API key would silently disable auth on every endpoint, so fail fast
 // instead of starting with an unauthenticated API (#56).
 func (c *Config) Validate() error {
+	switch c.Env {
+	case "development", "production":
+	default:
+		return fmt.Errorf("%w (got %q)", ErrInvalidEnv, c.Env)
+	}
 	if c.IsProduction() && c.APIKey == "" {
 		return ErrMissingAPIKey
 	}

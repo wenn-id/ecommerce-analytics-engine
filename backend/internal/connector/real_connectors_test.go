@@ -16,7 +16,7 @@ import (
 )
 
 func TestFactoryFallsBackToMocksWithoutCredentials(t *testing.T) {
-	connectors := connector.BuildConnectors(func(string) string { return "" })
+	connectors := connector.BuildConnectors(func(string) string { return "" }, false)
 	if len(connectors) != 3 {
 		t.Fatalf("expected 3 connectors, got %d", len(connectors))
 	}
@@ -28,8 +28,30 @@ func TestFactoryFallsBackToMocksWithoutCredentials(t *testing.T) {
 	}
 }
 
+func TestFactoryStrictInstallsUnavailableConnectors(t *testing.T) {
+	// Production must never persist mock data: channels without credentials
+	// become unavailable connectors that fail every fetch.
+	connectors := connector.BuildConnectors(func(string) string { return "" }, true)
+	if len(connectors) != 3 {
+		t.Fatalf("expected 3 connectors, got %d", len(connectors))
+	}
+	for _, c := range connectors {
+		if _, err := c.FetchCampaigns(context.Background()); err == nil {
+			t.Errorf("%s: expected unavailable connector to fail in strict mode", c.GetChannelCode())
+		}
+	}
+}
+
 func TestFactoryPrefersRealConnectorWithCredentials(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer token" {
+			http.Error(w, "missing bearer token", http.StatusUnauthorized)
+			return
+		}
+		if r.URL.Query().Get("access_token") != "" {
+			http.Error(w, "token must not travel in the query string", http.StatusBadRequest)
+			return
+		}
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": []interface{}{}, "paging": map[string]string{}})
 	}))
 	defer srv.Close()
@@ -46,10 +68,14 @@ func TestFactoryPrefersRealConnectorWithCredentials(t *testing.T) {
 			return ""
 		}
 	}
-	connectors := connector.BuildConnectors(env)
-	// TikTok/Shopee still fall back to mocks; Meta hits the test server.
+	connectors := connector.BuildConnectors(env, true)
+	// TikTok/Shopee are unavailable (strict); Meta hits the test server with
+	// its token in the Authorization header, never the query string.
 	if _, err := connectors[0].FetchCampaigns(context.Background()); err != nil {
 		t.Fatalf("real Meta connector should query the test server, got %v", err)
+	}
+	if _, err := connectors[1].FetchCampaigns(context.Background()); err == nil {
+		t.Fatal("TikTok without credentials should be unavailable in strict mode")
 	}
 }
 
@@ -249,7 +275,7 @@ func TestShopeeConnectorSignsRequestsAndAggregatesOrders(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	conn, err := connector.NewShopeeAPIConnector("12345", "partner-key", "shop-token", "999", srv.URL, "9001")
+	conn, err := connector.NewShopeeAPIConnector("12345", "partner-key", "shop-token", "999", srv.URL, "9001", "")
 	if err != nil {
 		t.Fatalf("connector: %v", err)
 	}

@@ -134,14 +134,21 @@ func NewClientIPResolver(trustedProxies []string) *ClientIPResolver {
 	return resolver
 }
 
-// Resolve returns the best-known client IP for the request: the first valid
-// X-Forwarded-For entry (falling back to X-Real-IP) when the immediate peer
-// is trusted, or the peer address itself otherwise.
-func (c *ClientIPResolver) Resolve(r *http.Request) string {
+// Peer returns the immediate peer address of the request (the TCP remote),
+// regardless of forwarded headers.
+func (c *ClientIPResolver) Peer(r *http.Request) string {
 	peerHost, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		peerHost = r.RemoteAddr
 	}
+	return peerHost
+}
+
+// Resolve returns the best-known client IP for the request: the first valid
+// X-Forwarded-For entry (falling back to X-Real-IP) when the immediate peer
+// is trusted, or the peer address itself otherwise.
+func (c *ClientIPResolver) Resolve(r *http.Request) string {
+	peerHost := c.Peer(r)
 	peerIP := net.ParseIP(peerHost)
 	if peerIP == nil {
 		// Non-IP peer (e.g. "localhost" from test servers): treat as loopback.
