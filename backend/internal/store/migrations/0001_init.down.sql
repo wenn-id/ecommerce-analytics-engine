@@ -1,0 +1,14 @@
+DROP INDEX IF EXISTS idx_sync_logs_channel_synced;
+DROP INDEX IF EXISTS idx_sync_logs_channel_id;
+DROP INDEX IF EXISTS idx_daily_sales_metrics_channel_date;
+DROP INDEX IF EXISTS idx_daily_sales_metrics_date;
+DROP INDEX IF EXISTS idx_daily_ad_metrics_campaign_date;
+DROP INDEX IF EXISTS idx_daily_ad_metrics_date;
+DROP INDEX IF EXISTS idx_campaigns_name;
+DROP INDEX IF EXISTS idx_campaigns_status;
+DROP INDEX IF EXISTS idx_campaigns_channel_id;
+DROP TABLE IF EXISTS sync_logs;
+DROP TABLE IF EXISTS daily_sales_metrics;
+DROP TABLE IF EXISTS daily_ad_metrics;
+DROP TABLE IF EXISTS campaigns;
+DROP TABLE IF EXISTS channels;

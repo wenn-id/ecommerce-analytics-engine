@@ -26,10 +26,11 @@ async function proxyRequest(request: NextRequest, pathSegments: string[]) {
 
   const headers = new Headers();
   headers.set('Content-Type', 'application/json');
+  // Only the server-side key is ever forwarded. When it is unset the request
+  // is sent without a key: the backend is then intentionally keyless (dev
+  // default), and a browser-supplied key is never trusted (#63).
   if (SERVER_API_KEY) {
     headers.set('X-API-Key', SERVER_API_KEY);
-  } else if (request.headers.get('x-api-key')) {
-    headers.set('X-API-Key', request.headers.get('x-api-key')!);
   }
 
   const requestedWith = request.headers.get('x-requested-with') || 'XMLHttpRequest';
@@ -40,8 +41,18 @@ async function proxyRequest(request: NextRequest, pathSegments: string[]) {
     headers.set('X-CSRF-Token', csrfToken);
   }
 
-  const clientIp = request.ip || '127.0.0.1';
-  headers.set('X-Forwarded-For', clientIp);
+  // Forward the incoming X-Forwarded-For chain untouched. The App Router
+  // cannot read the TCP peer address, so any value we would write here is
+  // client-controlled anyway; rewriting it (e.g. picking the first hop)
+  // would only lend our proxy's credibility to a spoofed entry. The backend
+  // walks the chain itself and, crucially, rate limits the aggregate
+  // forwarding peer so spoofed chains cannot bypass per-client limits.
+  // When the header is absent (direct browser call), forward nothing and
+  // let the backend attribute the request to the BFF peer (#63).
+  const forwardedFor = request.headers.get('x-forwarded-for');
+  if (forwardedFor) {
+    headers.set('X-Forwarded-For', forwardedFor);
+  }
 
   const reqInit: RequestInit = {
     method: request.method,

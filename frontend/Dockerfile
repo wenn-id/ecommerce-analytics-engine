@@ -16,17 +16,18 @@ WORKDIR /app
 
 ENV NODE_ENV=production \
     PORT=3000 \
+    HOSTNAME=0.0.0.0 \
     NEXT_TELEMETRY_DISABLED=1
 
-RUN mkdir -p /app/public
-
+# Next.js standalone output: only the traced server bundle, static assets and
+# the public folder ship in the image — no node_modules, no devDependencies
+# (#60).
 COPY --from=builder /app/public ./public
-COPY --from=builder --chown=node:node /app/.next ./.next
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/package.json ./package.json
+COPY --from=builder --chown=node:node /app/.next/standalone ./
+COPY --from=builder --chown=node:node /app/.next/static ./.next/static
 
 USER node
 
 EXPOSE 3000
 
-CMD ["npm", "start"]
+CMD ["node", "server.js"]
