@@ -151,20 +151,21 @@ func (h *MetricsHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-
 	pingCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
 
 	dbStatus := "up"
-	if err := h.repo.Ping(pingCtx); err != nil {
-		dbStatus = "down"
-		slog.Error("health check database ping failed", "error", err)
-		jsonResponse(w, http.StatusServiceUnavailable, map[string]string{
-			"status":    "degraded",
-			"database":  dbStatus,
-			"timestamp": time.Now().Format(time.RFC3339),
-		})
-		return
+	if h.repo != nil {
+		if err := h.repo.Ping(pingCtx); err != nil {
+			dbStatus = "down"
+			slog.Error("health check database ping failed", "error", err)
+			jsonResponse(w, http.StatusServiceUnavailable, map[string]string{
+				"status":    "degraded",
+				"database":  dbStatus,
+				"timestamp": time.Now().Format(time.RFC3339),
+			})
+			return
+		}
 	}
 
 	jsonResponse(w, http.StatusOK, map[string]string{
