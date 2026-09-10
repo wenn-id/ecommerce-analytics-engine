@@ -101,13 +101,6 @@ func (r *Registry) RecordSyncRun(channel, status string) {
 	r.syncRunsTotal.inc(channel + "|" + status)
 }
 
-func escapeLabel(v string) string {
-	v = strings.ReplaceAll(v, `\`, `\\`)
-	v = strings.ReplaceAll(v, `"`, `\"`)
-	v = strings.ReplaceAll(v, "\n", `\n`)
-	return v
-}
-
 // Render produces the Prometheus text exposition format.
 func (r *Registry) Render() string {
 	var b strings.Builder
@@ -123,7 +116,7 @@ func (r *Registry) Render() string {
 	for _, k := range keys {
 		parts := strings.SplitN(k, "|", 3)
 		fmt.Fprintf(&b, "http_requests_total{code=%q,method=%q,route=%q} %d\n",
-			escapeLabel(parts[0]), escapeLabel(parts[1]), escapeLabel(parts[2]), reqs[k])
+			parts[0], parts[1], parts[2], reqs[k])
 	}
 
 	r.httpRequestDuration.mu.Lock()
@@ -137,8 +130,8 @@ func (r *Registry) Render() string {
 	for _, route := range routes {
 		cnt := atomic.LoadInt64(r.httpRequestDuration.counts[route])
 		totalMs := atomic.LoadInt64(r.httpRequestDuration.totals[route])
-		fmt.Fprintf(&b, "http_request_duration_seconds_count{route=%q} %d\n", escapeLabel(route), cnt)
-		fmt.Fprintf(&b, "http_request_duration_seconds_sum{route=%q} %f\n", escapeLabel(route), float64(totalMs)/1000)
+		fmt.Fprintf(&b, "http_request_duration_seconds_count{route=%q} %d\n", route, cnt)
+		fmt.Fprintf(&b, "http_request_duration_seconds_sum{route=%q} %f\n", route, float64(totalMs)/1000)
 	}
 	r.httpRequestDuration.mu.Unlock()
 
@@ -157,7 +150,7 @@ func (r *Registry) Render() string {
 	for _, k := range keys {
 		parts := strings.SplitN(k, "|", 2)
 		fmt.Fprintf(&b, "sync_runs_total{channel=%q,status=%q} %d\n",
-			escapeLabel(parts[0]), escapeLabel(parts[1]), syncs[k])
+			parts[0], parts[1], syncs[k])
 	}
 
 	return b.String()
